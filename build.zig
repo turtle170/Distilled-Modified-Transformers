@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.want_lto = true;
 
     // --- Modern libllama & libggml Build Integration ---
     // Assuming llama.cpp source is cloned to 'deps/llama.cpp'
@@ -22,21 +23,21 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    libllama.want_lto = true;
     libllama.linkLibC();
     libllama.linkLibCpp();
 
-    // Hyper-optimization flags covering SSE up to AVX-512 VNNI
+    // Hyper-optimization flags using march=native for portability and performance
     const c_flags = &[_][]const u8{
         "-std=c11", "-fPIC", "-O3", "-Wall", "-Wextra",
         "-DGGML_USE_K_QUANTS", "-D_GNU_SOURCE",
-        "-msse3", "-mssse3", "-mcx16", 
-        "-mavx", "-mavx2", "-mfma", "-mf16c",
-        "-mavx512f", "-mavx512bw", "-mavx512dq", "-mavx512vl",
-        "-mavx512vnni", "-mavxvnni",
+        "-march=native", "-mtune=native",
     };
 
     const cpp_flags = &[_][]const u8{
         "-std=c++17", "-fPIC", "-O3", "-Wall", "-Wextra",
+        "-DGGML_USE_K_QUANTS", "-D_GNU_SOURCE",
+        "-march=native", "-mtune=native",
     };
 
     // 1. Compile GGML core (modern llama.cpp structure)
