@@ -53,13 +53,13 @@ pub fn parseQuantType(quant_str: []const u8) llama.llama_ftype {
     return llama.LLAMA_FTYPE_MOSTLY_Q4_K_M;
 }
 
-pub fn exportModel(allocator: std.mem.Allocator, model: *llama.llama_model, model_path: []const u8, out_dir: []const u8, cycle: u32, format: ExportFormat, ftype: llama.llama_ftype) !void {
+pub fn exportModel(io: std.Io, allocator: std.mem.Allocator, model: *anyopaque, model_path: []const u8, out_dir: []const u8, cycle: u32, format: ExportFormat, ftype: c_uint) !void {
     const filename = try std.fmt.allocPrint(allocator, "{s}/dmt_student_cycle_{d}", .{ out_dir, cycle });
     defer allocator.free(filename);
 
     switch (format) {
         .gguf => try exportGGUF(model_path, filename, ftype),
-        .safetensors => try exportSafeTensors(allocator, model, filename),
+        .safetensors => try exportSafeTensors(io, allocator, model, filename),
         .onnx => std.debug.print("-> ONNX Export: Requires linking libonnxruntime. C-API Bridge invoked for {s}.onnx\n", .{filename}),
         .exl2 => std.debug.print("-> EXL2 Export: Requires exllamav2 bindings. C-API Bridge invoked for {s}-exl2/\n", .{filename}),
         .awq => std.debug.print("-> AWQ Export: Activation-aware quantization bridge invoked for {s}-awq/\n", .{filename}),
@@ -70,9 +70,9 @@ pub fn exportModel(allocator: std.mem.Allocator, model: *llama.llama_model, mode
 }
 
 /// Natively delegates to llama.cpp's internal quantizer to rewrite the GGUF with new weights/quants
-fn exportGGUF(orig_path: []const u8, out_base: []const u8, ftype: llama.llama_ftype) !void {
+fn exportGGUF(orig_path: []const u8, out_base: []const u8, ftype: c_uint) !void {
     var params = llama.llama_model_quantize_default_params();
-    params.ftype = ftype;
+    params.ftype = @intCast(ftype);
     
     // We would pass the current memory state to the quantizer.
     // Llama.cpp CLI uses llama_model_quantize(orig, dest, params)
@@ -88,15 +88,15 @@ fn exportGGUF(orig_path: []const u8, out_base: []const u8, ftype: llama.llama_ft
 }
 
 /// Pure Zig implementation of zero-copy SafeTensors export directly from ggml memory.
-fn exportSafeTensors(allocator: std.mem.Allocator, model: *llama.llama_model, out_base: []const u8) !void {
+fn exportSafeTensors(io: std.Io, allocator: std.mem.Allocator, model: *anyopaque, out_base: []const u8) !void {
     _ = model; // In production, we iterate ggml_get_first_tensor(ctx)
     const out_file = try std.fmt.allocPrint(allocator, "{s}.safetensors", .{out_base});
     defer allocator.free(out_file);
     
     std.debug.print("-> Writing native zero-copy SafeTensors to {s}...\n", .{out_file});
 
-    const file = try std.fs.cwd().createFile(out_file, .{});
-    defer file.close();
+    const file = try std.Io.Dir.createFile(.cwd(), io, out_file, .{});
+    defer file.close(io);
 
     // 1. Build the JSON Header
     // Example placeholder: actual implementation maps ggml tensor names & shapes to JSON
@@ -114,10 +114,10 @@ fn exportSafeTensors(allocator: std.mem.Allocator, model: *llama.llama_model, ou
     // 2. Write 8-byte N (length of JSON)
     var len_bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &len_bytes, json_header.len, .little);
-    try file.writeAll(&len_bytes);
+    try file.writeStreamingAll(io, &len_bytes);
 
     // 3. Write JSON header
-    try file.writeAll(json_header);
+    try file.writeStreamingAll(io, json_header);
 
     // 4. Stream raw tensor data (zero-copy from memory)
     // For every tensor: try file.writeAll(std.mem.asBytes(tensor.data)[0 .. tensor.n_bytes]);

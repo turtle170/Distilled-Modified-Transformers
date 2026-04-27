@@ -43,13 +43,18 @@ const Config = struct {
     save_freq: u32 = 100, // Save every N cycles
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_it.deinit();
+
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    while (args_it.next()) |arg| {
+        args_list.append(allocator, arg) catch @panic("OOM");
+    }
+    const args = args_list.items;
 
     if (args.len < 2 or !std.mem.eql(u8, args[1], "train")) {
         printUsage();
@@ -70,8 +75,8 @@ pub fn main() !void {
     std.debug.print("DMT Core: Backend Initialized. Threads: {d}\n", .{config.threads});
 
     // 2. Load Models (with Auto-Quantization based on param count)
-    const opt_student_path = try prepareModel(allocator, config.student_path, "student");
-    const opt_judge_path = try prepareModel(allocator, config.judge_path, "judge");
+    const opt_student_path = try prepareModel(init.io, allocator, config.student_path, "student");
+    const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge");
 
     const opt_student_path_z = try allocator.dupeZ(u8, opt_student_path);
     const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
@@ -91,15 +96,15 @@ pub fn main() !void {
     // 3. Setup Contexts
     var student_ctx_params = llama.llama_context_default_params();
     student_ctx_params.n_ctx = config.student_ctx_size;
-    student_ctx_params.n_threads = config.threads;
-    student_ctx_params.n_threads_batch = config.threads_batch;
+    student_ctx_params.n_threads = @intCast(config.threads);
+    student_ctx_params.n_threads_batch = @intCast(config.threads_batch);
     const student_ctx = llama.llama_new_context_with_model(student_model, student_ctx_params) orelse return error.StudentCtxFailed;
     defer llama.llama_free(student_ctx);
 
     var judge_ctx_params = llama.llama_context_default_params();
     judge_ctx_params.n_ctx = config.judge_ctx_size;
-    judge_ctx_params.n_threads = config.threads;
-    judge_ctx_params.n_threads_batch = config.threads_batch;
+    judge_ctx_params.n_threads = @intCast(config.threads);
+    judge_ctx_params.n_threads_batch = @intCast(config.threads_batch);
     const judge_ctx = llama.llama_new_context_with_model(judge_model, judge_ctx_params) orelse return error.JudgeCtxFailed;
     defer llama.llama_free(judge_ctx);
 
@@ -114,16 +119,18 @@ pub fn main() !void {
     while (epoch < config.epochs) : (epoch += 1) {
         std.debug.print("Epoch {d}/{d}\n", .{epoch + 1, config.epochs});
         
-        const dataset_file = std.fs.cwd().openFile(config.dataset_path, .{}) catch |err| {
+        const dataset_file = std.Io.Dir.openFile(.cwd(), init.io, config.dataset_path, .{}) catch |err| {
             std.debug.print("Failed to open dataset: {}\n", .{err});
             return;
         };
-        defer dataset_file.close();
+        defer dataset_file.close(init.io);
         
-        var reader = std.io.bufferedReader(dataset_file.reader());
-        var line_buf: [32768]u8 = undefined;
+        var file_buf: [32768]u8 = undefined;
+        var file_reader = dataset_file.reader(init.io, &file_buf);
+        var reader = &file_reader.interface;
 
-        while (try reader.reader().readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
+        while (try reader.takeDelimiter('\n')) |line_raw| {
+            const line = std.mem.trimEnd(u8, line_raw, "\r");
             cycle += 1;
             
             // --- Step 1: Student Inference ---
@@ -159,6 +166,7 @@ pub fn main() !void {
                 
                 // Execute the zero-copy export or trigger conversion bridges
                 try exporter.exportModel(
+                    init.io,
                     allocator, 
                     student_model, 
                     config.student_path, 
@@ -260,7 +268,7 @@ fn pruneModelWeights(model: *llama.llama_model, p: *pruner.Pruner, rate: f32) !v
     // Internal API implementation: iterates through ggml_tensors and applies Pruner
 }
 
-fn prepareModel(allocator: std.mem.Allocator, orig_path: []const u8, prefix: []const u8) ![]const u8 {
+fn prepareModel(io: std.Io, allocator: std.mem.Allocator, orig_path: []const u8, prefix: []const u8) ![]const u8 {
     // 1. Load model with vocab_only to cheaply get metadata (fast, low memory)
     const orig_path_z = try allocator.dupeZ(u8, orig_path);
     defer allocator.free(orig_path_z);
@@ -297,7 +305,7 @@ fn prepareModel(allocator: std.mem.Allocator, orig_path: []const u8, prefix: []c
 
     // 2. Generate cached file path
     const cache_dir = ".dmt_cache";
-    std.fs.cwd().makeDir(cache_dir) catch |err| switch (err) {
+    std.Io.Dir.createDir(.cwd(), io, cache_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -305,7 +313,7 @@ fn prepareModel(allocator: std.mem.Allocator, orig_path: []const u8, prefix: []c
     const out_path = try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.gguf", .{cache_dir, prefix, ftype_name});
     
     // 3. If it already exists, return it
-    if (std.fs.cwd().access(out_path, .{})) |_| {
+    if (std.Io.Dir.access(.cwd(), io, out_path, .{})) |_| {
         std.debug.print("   Cached optimized model found: {s}\n", .{out_path});
         return out_path;
     } else |_| {
