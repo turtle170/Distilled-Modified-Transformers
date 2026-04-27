@@ -27,18 +27,30 @@ pub fn build(b: *std.Build) void {
     libllama.linkLibC();
     libllama.linkLibCpp();
 
-    // Hyper-optimization flags using march=native for portability and performance
-    const c_flags = &[_][]const u8{
+    const use_native = b.option(bool, "native", "Optimize for native CPU architecture (adds -march=native -mtune=native)") orelse false;
+
+    // Base flags
+    var c_flags_list = std.ArrayList([]const u8).init(b.allocator);
+    defer c_flags_list.deinit();
+    c_flags_list.appendSlice(&[_][]const u8{
         "-std=c11", "-fPIC", "-O3", "-Wall", "-Wextra",
         "-DGGML_USE_K_QUANTS", "-D_GNU_SOURCE",
-        "-march=native", "-mtune=native",
-    };
+    }) catch @panic("OOM");
 
-    const cpp_flags = &[_][]const u8{
+    var cpp_flags_list = std.ArrayList([]const u8).init(b.allocator);
+    defer cpp_flags_list.deinit();
+    cpp_flags_list.appendSlice(&[_][]const u8{
         "-std=c++17", "-fPIC", "-O3", "-Wall", "-Wextra",
         "-DGGML_USE_K_QUANTS", "-D_GNU_SOURCE",
-        "-march=native", "-mtune=native",
-    };
+    }) catch @panic("OOM");
+
+    if (use_native) {
+        c_flags_list.appendSlice(&[_][]const u8{ "-march=native", "-mtune=native" }) catch @panic("OOM");
+        cpp_flags_list.appendSlice(&[_][]const u8{ "-march=native", "-mtune=native" }) catch @panic("OOM");
+    }
+
+    const c_flags = c_flags_list.items;
+    const cpp_flags = cpp_flags_list.items;
 
     // 1. Compile GGML core (modern llama.cpp structure)
     libllama.addCSourceFiles(.{
