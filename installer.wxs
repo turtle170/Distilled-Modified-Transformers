@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*" Name="Distilled Modified Transformers CLI" Language="1033" Version="1.0.0.0" Manufacturer="turtle170" UpgradeCode="71B3E0C1-608E-45E5-9B28-AB3B5DF0A8C5">
+        <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of DMT CLI is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="DMT">
+                    <Component Id="MainExecutable" Guid="3F84A1C8-9B20-4355-8D83-1F4A633F9C7A" Win64="yes">
+                        <File Id="DMTExe" Source="zig-out\bin\dmt.exe" KeyPath="yes" />
+                        <Environment Id="UpdatePath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature Id="ProductFeature" Title="DMT CLI" Level="1">
+            <ComponentRef Id="MainExecutable" />
+        </Feature>
+
+        <UI>
+            <UIRef Id="WixUI_Minimal" />
+            <UIRef Id="WixUI_ErrorProgressText" />
+        </UI>
+        <WixVariable Id="WixUILicenseRtf" Value="LICENSE.rtf" />
+    </Product>
+</Wix>
