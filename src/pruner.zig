@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 /// Hyper-optimized Magnitude Pruner
-/// Utilizing AVX-512, AVX2, and SSE via Zig's @Vector primitives.
+/// Utilizing AVX-512, AVX2, SSE, and ARM NEON via Zig's @Vector primitives.
 pub const Pruner = struct {
     allocator: std.mem.Allocator,
 

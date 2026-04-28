@@ -34,6 +34,9 @@ pub fn build(b: *std.Build) void {
 
     const use_native = b.option(bool, "native", "Optimize for native CPU architecture (adds -march=native -mtune=native)") orelse false;
 
+    const target_arch = target.result.cpu.arch;
+    const target_os = target.result.os.tag;
+
     // Base flags
     var c_flags_list: std.ArrayList([]const u8) = .empty;
     defer c_flags_list.deinit(b.allocator);
@@ -51,9 +54,35 @@ pub fn build(b: *std.Build) void {
         "-DGGML_VERSION=\"unknown\"", "-DGGML_COMMIT=\"unknown\"",
     }) catch @panic("OOM");
 
+    // Architecture specific optimizations
+    if (target_arch == .x86_64 or target_arch == .x86) {
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{
+            "-msse3", "-mssse3", "-mcx16",
+            "-mavx", "-mavx2", "-mfma", "-mf16c",
+        }) catch @panic("OOM");
+        cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{
+            "-msse3", "-mssse3", "-mcx16",
+            "-mavx", "-mavx2", "-mfma", "-mf16c",
+        }) catch @panic("OOM");
+    } else if (target_arch == .aarch64 or target_arch == .aarch64_be) {
+        // ARM NEON is enabled by default on AArch64, but we ensure the preprocessor macros are ready.
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-D__ARM_NEON" }) catch @panic("OOM");
+        cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-D__ARM_NEON" }) catch @panic("OOM");
+    } else if (target_arch == .arm) {
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mfpu=neon", "-D__ARM_NEON" }) catch @panic("OOM");
+        cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mfpu=neon", "-D__ARM_NEON" }) catch @panic("OOM");
+    }
+
     if (use_native) {
         c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-march=native", "-mtune=native" }) catch @panic("OOM");
         cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-march=native", "-mtune=native" }) catch @panic("OOM");
+    }
+
+    if (target_os == .linux) {
+        libllama.root_module.linkSystemLibrary("pthread", .{});
+        libllama.root_module.linkSystemLibrary("m", .{});
+        exe.root_module.linkSystemLibrary("pthread", .{});
+        exe.root_module.linkSystemLibrary("m", .{});
     }
 
     const c_flags = c_flags_list.items;
