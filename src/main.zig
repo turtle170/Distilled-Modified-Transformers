@@ -56,15 +56,29 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    if (args.len < 2 or !std.mem.eql(u8, args[1], "train")) {
+    if (args.len < 2) {
+        printUsage();
+        return;
+    }
+
+    const command = args[1];
+    const is_train = std.mem.eql(u8, command, "train");
+    const is_distill = std.mem.eql(u8, command, "distill");
+
+    if (!is_train and !is_distill) {
         printUsage();
         return;
     }
 
     const config = try parseArgs(args[2..]);
     
-    if (config.student_path.len == 0 or config.judge_path.len == 0) {
-        std.debug.print("Error: --student and --judge paths are required.\n", .{});
+    if (is_train and (config.student_path.len == 0 or config.judge_path.len == 0 or config.dataset_path.len == 0)) {
+        std.debug.print("Error: --student, --judge, and --dataset paths are required for training.\n", .{});
+        return;
+    }
+
+    if (is_distill and config.student_path.len == 0) {
+        std.debug.print("Error: --student path is required for distillation.\n", .{});
         return;
     }
 
@@ -74,19 +88,46 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("DMT Core: Backend Initialized. Threads: {d}\n", .{config.threads});
 
-    // 2. Load Models (with Auto-Quantization based on param count)
+    // 2. Load Student Model (with Auto-Quantization based on param count)
     const opt_student_path = try prepareModel(init.io, allocator, config.student_path, "student");
-    const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge");
-
     const opt_student_path_z = try allocator.dupeZ(u8, opt_student_path);
-    const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
     defer allocator.free(opt_student_path_z);
-    defer allocator.free(opt_judge_path_z);
 
     var student_params = llama.llama_model_default_params();
     student_params.n_gpu_layers = config.ngl_student;
     const student_model = llama.llama_load_model_from_file(opt_student_path_z.ptr, student_params) orelse return error.StudentLoadFailed;
     defer llama.llama_free_model(student_model);
+
+    var engine_pruner = pruner.Pruner.init(allocator);
+
+    if (is_distill) {
+        std.debug.print("DMT: Commencing Pure Distillation (No Dataset)...\n", .{});
+        
+        std.debug.print("Performance optimization: Engaging {s} pruning at {d}%...\n", .{config.prune_method, config.prune_rate * 100});
+        try pruneModelWeights(student_model, &engine_pruner, config.prune_rate);
+
+        std.debug.print("Saving distilled model to {s}...\n", .{config.save_dir});
+        const out_format = exporter.parseFormat(config.out_format);
+        const quant_type = exporter.parseQuantType(config.quant_type);
+        
+        try exporter.exportModel(
+            init.io,
+            allocator, 
+            student_model, 
+            config.student_path, 
+            config.save_dir, 
+            0, 
+            out_format, 
+            quant_type
+        );
+        std.debug.print("Pure Distillation Complete.\n", .{});
+        return;
+    }
+
+    // --- Train Mode Specific Loading ---
+    const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge");
+    const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
+    defer allocator.free(opt_judge_path_z);
 
     var judge_params = llama.llama_model_default_params();
     judge_params.n_gpu_layers = config.ngl_judge;
@@ -109,7 +150,6 @@ pub fn main(init: std.process.Init) !void {
     defer llama.llama_free(judge_ctx);
 
     // 4. DMT Training Loop
-    var engine_pruner = pruner.Pruner.init(allocator);
     var last_score: i64 = 0;
     var cycle: u32 = 0;
 
@@ -212,12 +252,19 @@ fn parseArgs(args: [][]const u8) !Config {
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage: dmt train [options]
+        \\Usage: dmt <command> [options]
         \\
-        \\Required:
+        \\Commands:
+        \\  train                 Run evolutionary distillation with a Judge and dataset.
+        \\  distill               Run pure distillation (pruning/quantization) directly on a Student model.
+        \\
+        \\Required for Train:
         \\  --student <PATH>      Path to Student GGUF model
         \\  --judge <PATH>        Path to Judge GGUF model
         \\  --dataset <PATH>      Path to .jsonl dataset
+        \\
+        \\Required for Distill:
+        \\  --student <PATH>      Path to Student GGUF model
         \\
         \\Execution Options:
         \\  --threads <N>         Number of threads for generation (default: 8)
