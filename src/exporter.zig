@@ -87,39 +87,21 @@ fn exportGGUF(orig_path: []const u8, out_base: []const u8, ftype: c_uint) !void 
     }
 }
 
+const c_bridge = @cImport({
+    @cInclude("dmt_bridge.h");
+});
+
 /// Pure Zig implementation of zero-copy SafeTensors export directly from ggml memory.
 fn exportSafeTensors(io: std.Io, allocator: std.mem.Allocator, model: *anyopaque, out_base: []const u8) !void {
-    _ = model; // In production, we iterate ggml_get_first_tensor(ctx)
+    _ = io;
     const out_file = try std.fmt.allocPrint(allocator, "{s}.safetensors", .{out_base});
     defer allocator.free(out_file);
     
     std.debug.print("-> Writing native zero-copy SafeTensors to {s}...\n", .{out_file});
 
-    const file = try std.Io.Dir.createFile(.cwd(), io, out_file, .{});
-    defer file.close(io);
+    // Null terminate string for C bridge
+    const out_file_z = try allocator.dupeZ(u8, out_file);
+    defer allocator.free(out_file_z);
 
-    // 1. Build the JSON Header
-    // Example placeholder: actual implementation maps ggml tensor names & shapes to JSON
-    const json_header = 
-        \\{
-        \\  "__metadata__": { "format": "pt", "dmt_distilled": "true" },
-        \\  "model.embed_tokens.weight": {
-        \\    "dtype": "F32",
-        \\    "shape": [32000, 4096],
-        \\    "data_offsets": [0, 524288000]
-        \\  }
-        \\}
-    ;
-
-    // 2. Write 8-byte N (length of JSON)
-    var len_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &len_bytes, json_header.len, .little);
-    try file.writeStreamingAll(io, &len_bytes);
-
-    // 3. Write JSON header
-    try file.writeStreamingAll(io, json_header);
-
-    // 4. Stream raw tensor data (zero-copy from memory)
-    // For every tensor: try file.writeAll(std.mem.asBytes(tensor.data)[0 .. tensor.n_bytes]);
-    std.debug.print("   SafeTensors export completed successfully.\n", .{});
+    c_bridge.dmt_export_safetensors_impl(@ptrCast(model), out_file_z.ptr);
 }

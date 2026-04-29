@@ -96,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
 
     var student_params = llama.llama_model_default_params();
     student_params.n_gpu_layers = config.ngl_student;
+    student_params.use_mmap = false; // Disable mmap so we can dynamically prune weights in RAM
     const student_model = llama.llama_load_model_from_file(opt_student_path_z.ptr, student_params) orelse return error.StudentLoadFailed;
     defer llama.llama_free_model(student_model);
 
@@ -108,6 +109,7 @@ pub fn main(init: std.process.Init) !void {
 
     var judge_params = llama.llama_model_default_params();
     judge_params.n_gpu_layers = config.ngl_judge;
+    judge_params.use_mmap = false;
     const judge_model = llama.llama_load_model_from_file(opt_judge_path_z.ptr, judge_params) orelse return error.JudgeLoadFailed;
     defer llama.llama_free_model(judge_model);
 
@@ -335,9 +337,13 @@ fn parseScore(s: []const u8) i64 {
     return if (found) val else 0;
 }
 
+const c_bridge = @cImport({
+    @cInclude("dmt_bridge.h");
+});
+
 fn pruneModelWeights(model: *llama.llama_model, p: *pruner.Pruner, rate: f32) !void {
-    _ = model; _ = p; _ = rate;
-    // Internal API implementation: iterates through ggml_tensors and applies Pruner
+    _ = p;
+    c_bridge.dmt_prune_model_tensors(@ptrCast(model), rate);
 }
 
 fn prepareModel(io: std.Io, allocator: std.mem.Allocator, orig_path: []const u8, prefix: []const u8) ![]const u8 {
