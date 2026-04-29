@@ -141,14 +141,18 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("--- Refinement Cycle {d}/{d} ---\n", .{cycle + 1, cycles});
             
             // Evaluation
-            const response = try runInference(student_ctx, test_prompt, 256, config.student_temp);
+            const response = try runInference(allocator, student_ctx, test_prompt, 256, config.student_temp);
+            defer allocator.free(response);
+
             const judge_prompt = try std.fmt.allocPrint(allocator, 
                 "You are an ultra-pedantic AI judge. Compare the Student's output to the Expected Concept. " ++
                 "Evaluate Logic, Factuality, and Efficiency. Output ONLY a single integer score between 0 and 1000000. " ++
                 "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, response});
             defer allocator.free(judge_prompt);
             
-            const current_score = parseScore(try runInference(judge_ctx, judge_prompt, 16, config.judge_temp));
+            const current_score_str = try runInference(allocator, judge_ctx, judge_prompt, 16, config.judge_temp);
+            defer allocator.free(current_score_str);
+            const current_score = parseScore(current_score_str);
             std.debug.print("Current Judge Score: {d}\n", .{current_score});
 
             // Guttering parameters
@@ -199,8 +203,8 @@ pub fn main(init: std.process.Init) !void {
             cycle += 1;
             
             // --- Step 1: Student Inference ---
-            // In full implementation, we use llama_decode and samplers here based on config.student_temp
-            const response = try runInference(student_ctx, line, 256, config.student_temp);
+            const response = try runInference(allocator, student_ctx, line, 256, config.student_temp);
+            defer allocator.free(response);
             
             // --- Step 2: Judge Evaluation ---
             const judge_prompt = try std.fmt.allocPrint(allocator, 
@@ -209,7 +213,8 @@ pub fn main(init: std.process.Init) !void {
                 "Context: {s}\nStudent: {s}\nScore:", .{line, response});
             defer allocator.free(judge_prompt);
 
-            const score_str = try runInference(judge_ctx, judge_prompt, 16, config.judge_temp);
+            const score_str = try runInference(allocator, judge_ctx, judge_prompt, 16, config.judge_temp);
+            defer allocator.free(score_str);
             const current_score = parseScore(score_str);
 
             std.debug.print("[Cycle {d}] Score: {d} | Delta: {d}\n", .{cycle, current_score, current_score - last_score});
@@ -291,6 +296,7 @@ fn printUsage() void {
         \\
         \\Required for Distill:
         \\  --student <PATH>      Path to Student GGUF model
+        \\  --judge <PATH>        Path to Judge GGUF model
         \\
         \\Execution Options:
         \\  --threads <N>         Number of threads for generation (default: 8)
@@ -319,10 +325,80 @@ fn printUsage() void {
     , .{});
 }
 
-fn runInference(ctx: *llama.llama_context, prompt: []const u8, max_tokens: i32, temp: f32) ![]const u8 {
-    _ = ctx; _ = prompt; _ = max_tokens; _ = temp;
-    // In production, this sets up the llama_batch, llama_decode, and llama_sampler loops
-    return "MOCKED_RESPONSE";
+fn runInference(allocator: std.mem.Allocator, ctx: *llama.llama_context, prompt: []const u8, max_tokens: i32, temp: f32) ![]const u8 {
+    const model = llama.llama_get_model(ctx);
+    const vocab = llama.llama_model_get_vocab(model);
+
+    // Clear KV cache (sequence 0)
+    const memory = llama.llama_get_memory(ctx);
+    _ = llama.llama_memory_seq_rm(memory, 0, -1, -1);
+
+    // 1. Tokenize prompt
+    const tokens = try allocator.alloc(llama.llama_token, prompt.len + 4);
+    defer allocator.free(tokens);
+    const n_tokens = llama.llama_tokenize(vocab, prompt.ptr, @intCast(prompt.len), tokens.ptr, @intCast(tokens.len), true, true);
+    if (n_tokens < 0) return error.TokenizeFailed;
+
+    // 2. Setup sampler
+    const sparams = llama.llama_sampler_chain_default_params();
+    const smpl = llama.llama_sampler_chain_init(sparams);
+    defer llama.llama_sampler_free(smpl);
+
+    if (temp > 0) {
+        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_temp(temp));
+        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_dist(42));
+    } else {
+        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_greedy());
+    }
+
+    // 3. Decode Loop
+    var response: std.ArrayList(u8) = .empty;
+    errdefer response.deinit(allocator);
+
+    // Use n_tokens as max capacity for prompt batch
+    var batch = llama.llama_batch_init(@intCast(n_tokens), 0, 1);
+    defer llama.llama_batch_free(batch);
+
+    // Load prompt tokens into batch
+    for (0..@intCast(n_tokens)) |i| {
+        batch.token[i] = tokens[i];
+        batch.pos[i] = @intCast(i);
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i] = 0;
+    }
+    // We only need logits for the last token to sample next
+    batch.logits[@intCast(n_tokens - 1)] = 1;
+
+    var n_cur: i32 = n_tokens;
+    var n_gen: i32 = 0;
+    while (n_gen < max_tokens) {
+        if (llama.llama_decode(ctx, batch) != 0) return error.DecodeFailed;
+        
+        const token = llama.llama_sampler_sample(smpl, ctx, -1);
+        llama.llama_sampler_accept(smpl, token);
+
+        if (llama.llama_vocab_is_eog(vocab, token)) break;
+
+        var piece_buf: [256]u8 = undefined;
+        const n_piece = llama.llama_token_to_piece(vocab, token, &piece_buf, @intCast(piece_buf.len), 0, true);
+        if (n_piece > 0) {
+            try response.appendSlice(allocator, piece_buf[0..@intCast(n_piece)]);
+        }
+
+        // Prepare next batch with the single sampled token
+        batch.n_tokens = 1;
+        batch.token[0] = token;
+        batch.pos[0] = n_cur;
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = 1;
+
+        n_cur += 1;
+        n_gen += 1;
+    }
+
+    return try response.toOwnedSlice(allocator);
 }
 
 fn parseScore(s: []const u8) i64 {
