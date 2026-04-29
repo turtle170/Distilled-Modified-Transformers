@@ -23,6 +23,20 @@ git clone https://github.com/ggerganov/llama.cpp deps/llama.cpp
 zig build -Drelease=true -Dnative=true
 ```
 
+### Hardware Optimization Build Flags
+When building from source, you can explicitly target specific CPU instruction sets for maximum tensor performance. Add these flags to your `zig build` command (e.g., `zig build -Drelease=true -Davx512=true -Davx512_vnni=true`).
+
+* `-Dnative=true`: Automatically detect and compile for your host machine's optimal architecture (includes `-march=native -mtune=native`).
+* `-Dsse3=true`: Enable SSE3 instructions.
+* `-Davx=true`: Enable AVX instructions.
+* `-Davx2=true`: Enable AVX2, FMA, and F16C instructions.
+* `-Davx512=true`: Enable base AVX-512 instructions (F, BW, DQ, VL).
+* `-Davx512_vnni=true`: Enable AVX-512 VNNI instructions (massively accelerates int8 quantized tensor math).
+* `-Davx_vnni=true`: Enable AVX-VNNI (VNNI features without requiring 512-bit registers).
+* `-Davx10=true`: Enable AVX10 (AVX10.1-256) instructions.
+
+*Note: ARM architectures (AArch64 / ARM) natively apply `__ARM_NEON` optimizations automatically.*
+
 ## Usage
 
 ### 1. Evolutionary Training Mode (`train`)
