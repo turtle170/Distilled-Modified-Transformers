@@ -77,8 +77,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (is_distill and config.student_path.len == 0) {
-        std.debug.print("Error: --student path is required for distillation.\n", .{});
+    if (is_distill and (config.student_path.len == 0 or config.judge_path.len == 0)) {
+        std.debug.print("Error: --student and --judge paths are required for distillation.\n", .{});
         return;
     }
 
@@ -100,31 +100,7 @@ pub fn main(init: std.process.Init) !void {
 
     var engine_pruner = pruner.Pruner.init(allocator);
 
-    if (is_distill) {
-        std.debug.print("DMT: Commencing Pure Distillation (No Dataset)...\n", .{});
-        
-        std.debug.print("Performance optimization: Engaging {s} pruning at {d}%...\n", .{config.prune_method, config.prune_rate * 100});
-        try pruneModelWeights(student_model, &engine_pruner, config.prune_rate);
-
-        std.debug.print("Saving distilled model to {s}...\n", .{config.save_dir});
-        const out_format = exporter.parseFormat(config.out_format);
-        const quant_type = exporter.parseQuantType(config.quant_type);
-        
-        try exporter.exportModel(
-            init.io,
-            allocator, 
-            student_model, 
-            config.student_path, 
-            config.save_dir, 
-            0, 
-            out_format, 
-            quant_type
-        );
-        std.debug.print("Pure Distillation Complete.\n", .{});
-        return;
-    }
-
-    // --- Train Mode Specific Loading ---
+    // --- Judge Loading (Shared) ---
     const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge");
     const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
     defer allocator.free(opt_judge_path_z);
@@ -148,6 +124,56 @@ pub fn main(init: std.process.Init) !void {
     judge_ctx_params.n_threads_batch = @intCast(config.threads_batch);
     const judge_ctx = llama.llama_new_context_with_model(judge_model, judge_ctx_params) orelse return error.JudgeCtxFailed;
     defer llama.llama_free(judge_ctx);
+
+    if (is_distill) {
+        std.debug.print("DMT: Commencing Pure Distillation (No Dataset)...\n", .{});
+        
+        const test_prompt = "Explain the core concepts of quantum computing in simple terms.";
+        
+        // Initial Evaluation
+        std.debug.print("Running pre-distillation evaluation pass...\n", .{});
+        const initial_response = try runInference(student_ctx, test_prompt, 256, config.student_temp);
+        const initial_judge_prompt = try std.fmt.allocPrint(allocator, 
+            "You are an ultra-pedantic AI judge. Compare the Student's output to the Expected Concept. " ++
+            "Evaluate Logic, Factuality, and Efficiency. Output ONLY a single integer score between 0 and 1000000. " ++
+            "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, initial_response});
+        defer allocator.free(initial_judge_prompt);
+        
+        const initial_score = parseScore(try runInference(judge_ctx, initial_judge_prompt, 16, config.judge_temp));
+        std.debug.print("Pre-Distillation Judge Score: {d}\n", .{initial_score});
+
+        std.debug.print("Performance optimization: Engaging {s} pruning at {d}%...\n", .{config.prune_method, config.prune_rate * 100});
+        try pruneModelWeights(student_model, &engine_pruner, config.prune_rate);
+
+        // Post Evaluation
+        std.debug.print("Running post-distillation evaluation pass...\n", .{});
+        const post_response = try runInference(student_ctx, test_prompt, 256, config.student_temp);
+        const post_judge_prompt = try std.fmt.allocPrint(allocator, 
+            "You are an ultra-pedantic AI judge. Compare the Student's output to the Expected Concept. " ++
+            "Evaluate Logic, Factuality, and Efficiency. Output ONLY a single integer score between 0 and 1000000. " ++
+            "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, post_response});
+        defer allocator.free(post_judge_prompt);
+        
+        const post_score = parseScore(try runInference(judge_ctx, post_judge_prompt, 16, config.judge_temp));
+        std.debug.print("Post-Distillation Judge Score: {d} | Delta: {d}\n", .{post_score, post_score - initial_score});
+
+        std.debug.print("Saving distilled model to {s}...\n", .{config.save_dir});
+        const out_format = exporter.parseFormat(config.out_format);
+        const quant_type = exporter.parseQuantType(config.quant_type);
+        
+        try exporter.exportModel(
+            init.io,
+            allocator, 
+            student_model, 
+            config.student_path, 
+            config.save_dir, 
+            0, 
+            out_format, 
+            quant_type
+        );
+        std.debug.print("Pure Distillation Complete.\n", .{});
+        return;
+    }
 
     // 4. DMT Training Loop
     var last_score: i64 = 0;
