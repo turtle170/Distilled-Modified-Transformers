@@ -41,6 +41,7 @@ const Config = struct {
     // Training Loop
     epochs: u32 = 1,
     save_freq: u32 = 100, // Save every N cycles
+    quality: u8 = 1,      // Distillation quality level 1-10
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -126,36 +127,32 @@ pub fn main(init: std.process.Init) !void {
     defer llama.llama_free(judge_ctx);
 
     if (is_distill) {
-        std.debug.print("DMT: Commencing Pure Distillation (No Dataset)...\n", .{});
+        std.debug.print("DMT: Commencing Pure Distillation (Quality Level: {d})...\n", .{config.quality});
         
         const test_prompt = "Explain the core concepts of quantum computing in simple terms.";
-        
-        // Initial Evaluation
-        std.debug.print("Running pre-distillation evaluation pass...\n", .{});
-        const initial_response = try runInference(student_ctx, test_prompt, 256, config.student_temp);
-        const initial_judge_prompt = try std.fmt.allocPrint(allocator, 
-            "You are an ultra-pedantic AI judge. Compare the Student's output to the Expected Concept. " ++
-            "Evaluate Logic, Factuality, and Efficiency. Output ONLY a single integer score between 0 and 1000000. " ++
-            "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, initial_response});
-        defer allocator.free(initial_judge_prompt);
-        
-        const initial_score = parseScore(try runInference(judge_ctx, initial_judge_prompt, 16, config.judge_temp));
-        std.debug.print("Pre-Distillation Judge Score: {d}\n", .{initial_score});
+        const cycles = if (config.quality < 1) 1 else if (config.quality > 10) 10 else config.quality;
+        // Prune rate is spread across cycles for surgical refinement
+        const step_prune_rate = config.prune_rate / @as(f32, @floatFromInt(cycles));
 
-        std.debug.print("Performance optimization: Engaging {s} pruning at {d}%...\n", .{config.prune_method, config.prune_rate * 100});
-        try pruneModelWeights(student_model, &engine_pruner, config.prune_rate);
+        var cycle: u32 = 0;
+        while (cycle < cycles) : (cycle += 1) {
+            std.debug.print("--- Refinement Cycle {d}/{d} ---\n", .{cycle + 1, cycles});
+            
+            // Evaluation
+            const response = try runInference(student_ctx, test_prompt, 256, config.student_temp);
+            const judge_prompt = try std.fmt.allocPrint(allocator, 
+                "You are an ultra-pedantic AI judge. Compare the Student's output to the Expected Concept. " ++
+                "Evaluate Logic, Factuality, and Efficiency. Output ONLY a single integer score between 0 and 1000000. " ++
+                "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, response});
+            defer allocator.free(judge_prompt);
+            
+            const current_score = parseScore(try runInference(judge_ctx, judge_prompt, 16, config.judge_temp));
+            std.debug.print("Current Judge Score: {d}\n", .{current_score});
 
-        // Post Evaluation
-        std.debug.print("Running post-distillation evaluation pass...\n", .{});
-        const post_response = try runInference(student_ctx, test_prompt, 256, config.student_temp);
-        const post_judge_prompt = try std.fmt.allocPrint(allocator, 
-            "You are an ultra-pedantic AI judge. Compare the Student's output to the Expected Concept. " ++
-            "Evaluate Logic, Factuality, and Efficiency. Output ONLY a single integer score between 0 and 1000000. " ++
-            "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, post_response});
-        defer allocator.free(post_judge_prompt);
-        
-        const post_score = parseScore(try runInference(judge_ctx, post_judge_prompt, 16, config.judge_temp));
-        std.debug.print("Post-Distillation Judge Score: {d} | Delta: {d}\n", .{post_score, post_score - initial_score});
+            // Guttering parameters
+            std.debug.print("Guttering low-impact parameters (step rate: {d}%)...\n", .{step_prune_rate * 100});
+            try pruneModelWeights(student_model, &engine_pruner, step_prune_rate);
+        }
 
         std.debug.print("Saving distilled model to {s}...\n", .{config.save_dir});
         const out_format = exporter.parseFormat(config.out_format);
@@ -171,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
             out_format, 
             quant_type
         );
-        std.debug.print("Pure Distillation Complete.\n", .{});
+        std.debug.print("Iterative Distillation Complete.\n", .{});
         return;
     }
 
@@ -260,6 +257,7 @@ fn parseArgs(args: [][]const u8) !Config {
         else if (std.mem.eql(u8, flag, "--save-dir")) config.save_dir = val
         else if (std.mem.eql(u8, flag, "--out-format")) config.out_format = val
         else if (std.mem.eql(u8, flag, "--quant-type")) config.quant_type = val
+        else if (std.mem.eql(u8, flag, "--quality") or std.mem.eql(u8, flag, "-q")) config.quality = try std.fmt.parseInt(u8, val, 10)
         else if (std.mem.eql(u8, flag, "--threads")) config.threads = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--threads-batch")) config.threads_batch = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--ngl-student")) config.ngl_student = try std.fmt.parseInt(i32, val, 10)
@@ -299,6 +297,7 @@ fn printUsage() void {
         \\  --ngl-judge <N>       GPU layers for Judge (default: 0)
         \\
         \\Distillation Options:
+        \\  -q, --quality <N>     Distillation quality level [1-10] (default: 1). Higher = more refinement cycles.
         \\  --target-params <F>   Target parameter size in Billions (default: 5.5)
         \\  --prune-rate <F>      Percentage of weights to prune per drop (default: 0.01)
         \\  --prune-method <STR>  Pruning method [magnitude, random] (default: magnitude)
