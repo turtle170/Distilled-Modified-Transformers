@@ -192,6 +192,29 @@ void dmt_staple_models(struct llama_model * small_model, struct llama_model * bi
     std::cout << "-> DMT C-Bridge: Universal Staple Complete. Mapped " << stapled_tensors << " tensors to the small model's optimized architecture constraints.\n";
 }
 
+uint64_t dmt_get_active_parameters(struct llama_model * model) {
+    if (!model) return 0;
+    uint64_t active_count = 0;
+    
+    for (auto & kv : model->tensors_by_name) {
+        struct ggml_tensor * t = kv.second;
+        size_t n = ggml_nelements(t);
+        
+        if (t->type == GGML_TYPE_F32 && kv.first.find("weight") != std::string::npos) {
+            float * data = (float *)t->data;
+            for (size_t i = 0; i < n; ++i) {
+                if (std::abs(data[i]) >= 1e-7f) {
+                    active_count++;
+                }
+            }
+        } else {
+            // Assume biases, norms, and non-F32 metadata are fully active structural components
+            active_count += n;
+        }
+    }
+    return active_count;
+}
+
 void dmt_export_safetensors_impl(struct llama_model * model, const char * filename) {
     if (!model) return;
 
