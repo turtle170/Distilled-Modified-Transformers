@@ -6,23 +6,11 @@ const llama = @cImport({
 pub const ExportFormat = enum {
     gguf,
     safetensors,
-    onnx,
-    exl2,
-    awq,
-    pytorch,
-    tensorflow,
-    tflite,
 };
 
 pub fn parseFormat(format_str: []const u8) ExportFormat {
     if (std.mem.eql(u8, format_str, "gguf")) return .gguf;
     if (std.mem.eql(u8, format_str, "safetensors")) return .safetensors;
-    if (std.mem.eql(u8, format_str, "onnx")) return .onnx;
-    if (std.mem.eql(u8, format_str, "exl2")) return .exl2;
-    if (std.mem.eql(u8, format_str, "awq")) return .awq;
-    if (std.mem.eql(u8, format_str, "pytorch")) return .pytorch;
-    if (std.mem.eql(u8, format_str, "tf") or std.mem.eql(u8, format_str, "tensorflow")) return .tensorflow;
-    if (std.mem.eql(u8, format_str, "tflite")) return .tflite;
     return .gguf; // Default
 }
 
@@ -48,27 +36,20 @@ pub fn parseQuantType(quant_str: []const u8) llama.llama_ftype {
     if (std.mem.eql(u8, quant_str, "iq2_xs")) return llama.LLAMA_FTYPE_MOSTLY_IQ2_XS;
     if (std.mem.eql(u8, quant_str, "iq3_xxs")) return llama.LLAMA_FTYPE_MOSTLY_IQ3_XXS;
     if (std.mem.eql(u8, quant_str, "iq4_nl")) return llama.LLAMA_FTYPE_MOSTLY_IQ4_NL;
-    
+
     std.debug.print("Warning: Unknown quant type '{s}'. Defaulting to Q4_K_M.\n", .{quant_str});
     return llama.LLAMA_FTYPE_MOSTLY_Q4_K_M;
 }
 
 pub fn exportModel(io: std.Io, allocator: std.mem.Allocator, model: *anyopaque, model_path: []const u8, out_dir: []const u8, cycle: u32, format: ExportFormat, ftype: c_uint) !void {
-    const filename = try std.fmt.allocPrint(allocator, "{s}/dmt_student_cycle_{d}", .{ out_dir, cycle });
+    const filename = try std.fmt.allocPrint(allocator, "{s}/dmt_student_cycle_{d}", .{ out_dir, cycle });       
     defer allocator.free(filename);
 
     switch (format) {
         .gguf => try exportGGUF(model_path, filename, ftype),
         .safetensors => try exportSafeTensors(io, allocator, model, filename),
-        .onnx => std.debug.print("-> ONNX Export: Requires linking libonnxruntime. C-API Bridge invoked for {s}.onnx\n", .{filename}),
-        .exl2 => std.debug.print("-> EXL2 Export: Requires exllamav2 bindings. C-API Bridge invoked for {s}-exl2/\n", .{filename}),
-        .awq => std.debug.print("-> AWQ Export: Activation-aware quantization bridge invoked for {s}-awq/\n", .{filename}),
-        .pytorch => std.debug.print("-> PyTorch Export: Requires linking libtorch (C++). Tensor bridge invoked for {s}.pt\n", .{filename}),
-        .tensorflow => std.debug.print("-> TensorFlow Export: Requires libtensorflow_cc. Graph bridge invoked for {s}_savedmodel/\n", .{filename}),
-        .tflite => std.debug.print("-> TFLite Export: FlatBuffer bridge invoked for {s}.tflite\n", .{filename}),
     }
 }
-
 /// Natively delegates to llama.cpp's internal quantizer to rewrite the GGUF with new weights/quants
 fn exportGGUF(orig_path: []const u8, out_base: []const u8, ftype: c_uint) !void {
     var params = llama.llama_model_quantize_default_params();
