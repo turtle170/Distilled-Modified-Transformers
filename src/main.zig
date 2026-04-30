@@ -89,8 +89,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (is_distill and (config.student_path.len == 0 or config.judge_path.len == 0)) {
-        std.debug.print("Error: --student and --judge paths are required for distillation.\n", .{});
+    if (is_distill and config.student_path.len == 0) {
+        std.debug.print("Error: --student path is required for distillation.\n", .{});
         return;
     }
 
@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     var engine_pruner = pruner.Pruner.init(allocator);
 
     if (do_staple) {
-        std.debug.print("DMT: Commencing SAE Model Stapling...\n", .{});
+        std.debug.print("DMT: Commencing Parameter-Level Expansion (PLE) Stapling...\n", .{});
 
         // For the teacher (big model), we strictly bypass auto-quantization and use mmap
         // to stream weights directly from disk with minimal RAM footprint.
@@ -134,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
         teacher_params.use_mmap = true;  // READ DIRECTLY FROM DISK
         const teacher_model = llama.llama_load_model_from_file(opt_teacher_path_z.ptr, teacher_params) orelse return error.TeacherLoadFailed;
         
-        // Execute C-Bridge SAE Stapler
+        // Execute C-Bridge PLE Stapler
         stapleModels(student_model, teacher_model, config.read_linear);
         
         llama.llama_free_model(teacher_model); // Free teacher memory after stapling
@@ -161,11 +161,52 @@ pub fn main(init: std.process.Init) !void {
 
     if (do_distill and !is_train) {
         const judge_model_path = if (config.judge_path.len > 0) config.judge_path else config.teacher_path;
+        
         if (judge_model_path.len == 0) {
-            std.debug.print("Error: --judge path is required for distillation passes.\n", .{});
+            // PURE STRUCTURAL DISTILLATION (No Judge provided)
+            std.debug.print("DMT: Commencing Pure Structural Distillation (No Judge)...\n", .{});
+            
+            var current_active = getActiveParams(student_model);
+            const target_p = if (config.target_params_b > 0.0) @as(u64, @intFromFloat(config.target_params_b * 1_000_000_000.0)) else 0;
+            
+            if (target_p > 0 and current_active > target_p) {
+                var pass: u32 = 1;
+                while (current_active > target_p) : (pass += 1) {
+                    std.debug.print("--- Structural Pruning Pass {d} ---\n", .{pass});
+                    
+                    const diff = current_active - target_p;
+                    const excess_ratio = @as(f32, @floatFromInt(diff)) / @as(f32, @floatFromInt(current_active));
+                    const step_rate = if (excess_ratio < config.prune_rate) excess_ratio + 0.001 else config.prune_rate;
+                    
+                    std.debug.print("Guttering parameters (step rate: {d}%)...\n", .{step_rate * 100});
+                    try pruneModelWeights(student_model, &engine_pruner, step_rate);
+                    current_active = getActiveParams(student_model);
+                    std.debug.print("Active Parameters: {d} / Target: {d}\n", .{current_active, target_p});
+                }
+            } else {
+                std.debug.print("Guttering parameters (rate: {d}%)...\n", .{config.prune_rate * 100});
+                try pruneModelWeights(student_model, &engine_pruner, config.prune_rate);
+            }
+            
+            std.debug.print("Saving distilled model to {s}...\n", .{config.save_dir});
+            const out_format = exporter.parseFormat(config.out_format);
+            const quant_type = exporter.parseQuantType(config.quant_type);
+            
+            try exporter.exportModel(
+                init.io,
+                allocator, 
+                student_model, 
+                config.student_path, 
+                config.save_dir, 
+                0, 
+                out_format, 
+                quant_type
+            );
+            std.debug.print("Pure Structural Distillation Complete.\n", .{});
             return;
         }
 
+        // JUDGE EVALUATION DISTILLATION (Iterative)
         const opt_judge_path = try prepareModel(init.io, allocator, judge_model_path, "judge");
         const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
         defer allocator.free(opt_judge_path_z);
