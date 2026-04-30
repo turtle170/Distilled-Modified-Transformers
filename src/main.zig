@@ -113,13 +113,14 @@ pub fn main(init: std.process.Init) !void {
     if (is_staple or is_staple_distill) {
         std.debug.print("DMT: Commencing SAE Model Stapling...\n", .{});
 
-        const opt_teacher_path = try prepareModel(init.io, allocator, config.teacher_path, "teacher");
-        const opt_teacher_path_z = try allocator.dupeZ(u8, opt_teacher_path);
+        // For the teacher (big model), we strictly bypass auto-quantization and use mmap
+        // to stream weights directly from disk with minimal RAM footprint.
+        const opt_teacher_path_z = try allocator.dupeZ(u8, config.teacher_path);
         defer allocator.free(opt_teacher_path_z);
 
         var teacher_params = llama.llama_model_default_params();
-        teacher_params.n_gpu_layers = config.ngl_judge; // Use same gpu alloc as judge config
-        teacher_params.use_mmap = false; 
+        teacher_params.n_gpu_layers = 0; // Force CPU
+        teacher_params.use_mmap = true;  // READ DIRECTLY FROM DISK
         const teacher_model = llama.llama_load_model_from_file(opt_teacher_path_z.ptr, teacher_params) orelse return error.TeacherLoadFailed;
         
         // Execute C-Bridge SAE Stapler
