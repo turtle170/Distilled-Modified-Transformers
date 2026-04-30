@@ -53,17 +53,30 @@ dmt train --student mistral-7b.gguf \
           --quant-type iq2_xxs
 ```
 
-### 2. Pure Distillation Mode (`distill`)
-Executes an immediate structural compression and target re-quantization *without* a dataset or judge. Best used to quickly squeeze models down using hardware-accelerated thresholds.
+### 3. Model Stapling Mode (`staple`)
+Performs Parameter-Level Expansion (PLE) mathematically projecting the intelligence of a massive model directly into the sparse network architecture of a smaller model. Operates directly on the drive (zero RAM allocation for the teacher).
 
 ```bash
-dmt distill --student llama-3-8b.gguf \
-            --prune-rate 0.20 \
-            --prune-method magnitude \
-            --save-dir ./compressed \
-            --out-format gguf \
-            --quant-type q4_k_m
+dmt staple --student llama-3-8b.gguf \
+           --teacher llama-3-70b.gguf \
+           --save-dir ./stapled \
+           --out-format safetensors \
+           --read-linear
 ```
+
+### 4. Staple & Distill (`staple-distill`)
+Combines `staple` and `distill` into one step. First interpolates the big model's weights into the small model, then immediately evaluates and surgically distills the stapled topology using the judge.
+
+```bash
+dmt staple-distill --student llama-3-8b.gguf \
+                   --teacher llama-3-70b.gguf \
+                   --judge gemma-4b.gguf \
+                   --prune-rate 0.10 \
+                   --q 5
+```
+
+### Important Execution Flags
+* `--read-linear`: Reverses the stapling memory-access loop. Forces the engine to scan the Teacher model linearly. Use this when your Teacher model is massive (e.g. 70B+ parameters) and being read directly from a hard drive to prevent heavy OS mmap page fault thrashing. Without this, the system defaults to fast Random Access mapping (best if you have lots of RAM).
 
 ## License
 MIT License - Copyright (c) 2026 turtle170.

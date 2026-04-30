@@ -63,10 +63,16 @@ void dmt_prune_model_tensors(struct llama_model * model, float prune_rate) {
     std::cout << "-> DMT C-Bridge: Pruned " << pruned_total << " / " << total_elements << " F32 elements.\n";
 }
 
-void dmt_staple_models(struct llama_model * small_model, struct llama_model * big_model) {
+void dmt_staple_models(struct llama_model * small_model, struct llama_model * big_model, bool linear_read) {
     if (!small_model || !big_model) return;
     
     std::cout << "-> DMT C-Bridge: Engaging Parameter-Level Expansion (PLE) Universal Stapler...\n";
+    if (linear_read) {
+        std::cout << "-> DMT C-Bridge: Mode [LINEAR] - Sequentially scanning big model to prevent mmap thrashing.\n";
+    } else {
+        std::cout << "-> DMT C-Bridge: Mode [RANDOM ACCESS] - Mapping small model structure directly to target memory.\n";
+    }
+
     size_t stapled_tensors = 0;
 
     // First pass: Determine maximum block layer counts for structural proportion mapping
@@ -135,21 +141,45 @@ void dmt_staple_models(struct llama_model * small_model, struct llama_model * bi
                 int64_t b_ne2 = std::max<int64_t>(1, b_t->ne[2]);
                 int64_t b_ne3 = std::max<int64_t>(1, b_t->ne[3]);
 
-                // Project Big Model down to Small Model topology
-                for (int64_t i3 = 0; i3 < s_ne3; ++i3) {
-                    int64_t b_i3 = (i3 * b_ne3) / s_ne3;
-                    for (int64_t i2 = 0; i2 < s_ne2; ++i2) {
-                        int64_t b_i2 = (i2 * b_ne2) / s_ne2;
-                        for (int64_t i1 = 0; i1 < s_ne1; ++i1) {
-                            int64_t b_i1 = (i1 * b_ne1) / s_ne1;
-                            for (int64_t i0 = 0; i0 < s_ne0; ++i0) {
-                                int64_t b_i0 = (i0 * b_ne0) / s_ne0;
-                                
-                                size_t s_idx = i3*(s_ne2*s_ne1*s_ne0) + i2*(s_ne1*s_ne0) + i1*s_ne0 + i0;
-                                size_t b_idx = b_i3*(b_ne2*b_ne1*b_ne0) + b_i2*(b_ne1*b_ne0) + b_i1*b_ne0 + b_i0;
-                                
-                                // True structural staple: small topology perfectly intercepts the intelligence topology of the big model
-                                s_data[s_idx] = (s_data[s_idx] + b_data[b_idx]) * 0.5f;
+                if (linear_read) {
+                    // Iterate sequentially over the big model. This guarantees sequential reading from the disk
+                    // (preventing massive page fault thrashing when the big model is entirely mmap'd).
+                    for (int64_t i3 = 0; i3 < b_ne3; ++i3) {
+                        int64_t s_i3 = (i3 * s_ne3) / b_ne3;
+                        for (int64_t i2 = 0; i2 < b_ne2; ++i2) {
+                            int64_t s_i2 = (i2 * s_ne2) / b_ne2;
+                            for (int64_t i1 = 0; i1 < b_ne1; ++i1) {
+                                int64_t s_i1 = (i1 * s_ne1) / b_ne1;
+                                for (int64_t i0 = 0; i0 < b_ne0; ++i0) {
+                                    int64_t s_i0 = (i0 * s_ne0) / b_ne0;
+                                    
+                                    size_t b_idx = i3*(b_ne2*b_ne1*b_ne0) + i2*(b_ne1*b_ne0) + i1*b_ne0 + i0;
+                                    size_t s_idx = s_i3*(s_ne2*s_ne1*s_ne0) + s_i2*(s_ne1*s_ne0) + s_i1*s_ne0 + s_i0;
+                                    
+                                    // Average the big weights into the small weight
+                                    s_data[s_idx] = (s_data[s_idx] + b_data[b_idx]) * 0.5f;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Random Access Mode: Iterate sequentially over the small model.
+                    // This jumps randomly around the big model, which is faster if the big model is entirely in RAM
+                    // but slower if relying on disk via mmap.
+                    for (int64_t i3 = 0; i3 < s_ne3; ++i3) {
+                        int64_t b_i3 = (i3 * b_ne3) / s_ne3;
+                        for (int64_t i2 = 0; i2 < s_ne2; ++i2) {
+                            int64_t b_i2 = (i2 * b_ne2) / s_ne2;
+                            for (int64_t i1 = 0; i1 < s_ne1; ++i1) {
+                                int64_t b_i1 = (i1 * b_ne1) / s_ne1;
+                                for (int64_t i0 = 0; i0 < s_ne0; ++i0) {
+                                    int64_t b_i0 = (i0 * b_ne0) / s_ne0;
+                                    
+                                    size_t s_idx = i3*(s_ne2*s_ne1*s_ne0) + i2*(s_ne1*s_ne0) + i1*s_ne0 + i0;
+                                    size_t b_idx = b_i3*(b_ne2*b_ne1*b_ne0) + b_i2*(b_ne1*b_ne0) + b_i1*b_ne0 + b_i0;
+                                    
+                                    s_data[s_idx] = (s_data[s_idx] + b_data[b_idx]) * 0.5f;
+                                }
                             }
                         }
                     }

@@ -43,6 +43,8 @@ const Config = struct {
     epochs: u32 = 1,
     save_freq: u32 = 100, // Save every N cycles
     quality: u8 = 1,      // Distillation quality level 1-10
+    // Execution options
+    read_linear: bool = false, // RA is default for stapling
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -124,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
         const teacher_model = llama.llama_load_model_from_file(opt_teacher_path_z.ptr, teacher_params) orelse return error.TeacherLoadFailed;
         
         // Execute C-Bridge SAE Stapler
-        stapleModels(student_model, teacher_model);
+        stapleModels(student_model, teacher_model, config.read_linear);
         
         llama.llama_free_model(teacher_model); // Free teacher memory after stapling
 
@@ -317,7 +319,7 @@ fn parseArgs(args: [][]const u8) !Config {
         else if (std.mem.eql(u8, flag, "--save-dir")) config.save_dir = val
         else if (std.mem.eql(u8, flag, "--out-format")) config.out_format = val
         else if (std.mem.eql(u8, flag, "--quant-type")) config.quant_type = val
-        else if (std.mem.eql(u8, flag, "--quality") or std.mem.eql(u8, flag, "-q")) config.quality = try std.fmt.parseInt(u8, val, 10)
+        else if (std.mem.eql(u8, flag, "--read-linear")) config.read_linear = true
         else if (std.mem.eql(u8, flag, "--threads")) config.threads = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--threads-batch")) config.threads_batch = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--ngl-student")) config.ngl_student = try std.fmt.parseInt(i32, val, 10)
@@ -470,8 +472,8 @@ const c_bridge = @cImport({
     @cInclude("dmt_bridge.h");
 });
 
-fn stapleModels(student: *llama.llama_model, teacher: *llama.llama_model) void {
-    c_bridge.dmt_staple_models(@ptrCast(student), @ptrCast(teacher));
+fn stapleModels(student: *llama.llama_model, teacher: *llama.llama_model, linear_read: bool) void {
+    c_bridge.dmt_staple_models(@ptrCast(student), @ptrCast(teacher), linear_read);
 }
 
 fn pruneModelWeights(model: *llama.llama_model, p: *pruner.Pruner, rate: f32) !void {
