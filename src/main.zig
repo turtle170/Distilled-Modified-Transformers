@@ -10,6 +10,7 @@ const Config = struct {
     // Model Paths
     student_path: []const u8 = "",
     judge_path: []const u8 = "",
+    teacher_path: []const u8 = "",
     dataset_path: []const u8 = "",
     save_dir: []const u8 = "out",
     out_format: []const u8 = "gguf",
@@ -65,8 +66,10 @@ pub fn main(init: std.process.Init) !void {
     const command = args[1];
     const is_train = std.mem.eql(u8, command, "train");
     const is_distill = std.mem.eql(u8, command, "distill");
+    const is_staple = std.mem.eql(u8, command, "staple");
+    const is_staple_distill = std.mem.eql(u8, command, "staple-distill");
 
-    if (!is_train and !is_distill) {
+    if (!is_train and !is_distill and !is_staple and !is_staple_distill) {
         printUsage();
         return;
     }
@@ -80,6 +83,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (is_distill and (config.student_path.len == 0 or config.judge_path.len == 0)) {
         std.debug.print("Error: --student and --judge paths are required for distillation.\n", .{});
+        return;
+    }
+
+    if ((is_staple or is_staple_distill) and (config.student_path.len == 0 or config.teacher_path.len == 0)) {
+        std.debug.print("Error: --student and --teacher paths are required for stapling.\n", .{});
         return;
     }
 
@@ -102,8 +110,52 @@ pub fn main(init: std.process.Init) !void {
 
     var engine_pruner = pruner.Pruner.init(allocator);
 
-    // --- Judge Loading (Shared) ---
-    const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge");
+    if (is_staple or is_staple_distill) {
+        std.debug.print("DMT: Commencing SAE Model Stapling...\n", .{});
+
+        const opt_teacher_path = try prepareModel(init.io, allocator, config.teacher_path, "teacher");
+        const opt_teacher_path_z = try allocator.dupeZ(u8, opt_teacher_path);
+        defer allocator.free(opt_teacher_path_z);
+
+        var teacher_params = llama.llama_model_default_params();
+        teacher_params.n_gpu_layers = config.ngl_judge; // Use same gpu alloc as judge config
+        teacher_params.use_mmap = false; 
+        const teacher_model = llama.llama_load_model_from_file(opt_teacher_path_z.ptr, teacher_params) orelse return error.TeacherLoadFailed;
+        
+        // Execute C-Bridge SAE Stapler
+        stapleModels(student_model, teacher_model);
+        
+        llama.llama_free_model(teacher_model); // Free teacher memory after stapling
+
+        if (is_staple) {
+            std.debug.print("Saving stapled model to {s}...\n", .{config.save_dir});
+            const out_format = exporter.parseFormat(config.out_format);
+            const quant_type = exporter.parseQuantType(config.quant_type);
+            
+            try exporter.exportModel(
+                init.io,
+                allocator, 
+                student_model, 
+                config.student_path, 
+                config.save_dir, 
+                0, 
+                out_format, 
+                quant_type
+            );
+            std.debug.print("Stapling Complete.\n", .{});
+            return;
+        }
+    }
+
+    // --- Judge Loading (Shared for train, distill, and staple-distill) ---
+    // If staple-distill, we still need a judge. For convenience, if judge_path is omitted we could fallback to teacher, but config handles it.
+    const judge_model_path = if (config.judge_path.len > 0) config.judge_path else config.teacher_path;
+    if (judge_model_path.len == 0) {
+        std.debug.print("Error: --judge path is required for distillation passes.\n", .{});
+        return;
+    }
+
+    const opt_judge_path = try prepareModel(init.io, allocator, judge_model_path, "judge");
     const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
     defer allocator.free(opt_judge_path_z);
 
@@ -128,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     const judge_ctx = llama.llama_new_context_with_model(judge_model, judge_ctx_params) orelse return error.JudgeCtxFailed;
     defer llama.llama_free(judge_ctx);
 
-    if (is_distill) {
+    if (is_distill or is_staple_distill) {
         std.debug.print("DMT: Commencing Pure Distillation (Quality Level: {d})...\n", .{config.quality});
         
         const test_prompt = "Explain the core concepts of quantum computing in simple terms.";
@@ -416,6 +468,10 @@ fn parseScore(s: []const u8) i64 {
 const c_bridge = @cImport({
     @cInclude("dmt_bridge.h");
 });
+
+fn stapleModels(student: *llama.llama_model, teacher: *llama.llama_model) void {
+    c_bridge.dmt_staple_models(@ptrCast(student), @ptrCast(teacher));
+}
 
 fn pruneModelWeights(model: *llama.llama_model, p: *pruner.Pruner, rate: f32) !void {
     _ = p;

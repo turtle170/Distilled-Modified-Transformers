@@ -33,6 +33,15 @@ pub fn build(b: *std.Build) void {
     });
 
     const use_native = b.option(bool, "native", "Optimize for native CPU architecture (adds -march=native -mtune=native)") orelse false;
+    
+    // Explicit Instruction Set Options (x86_64 / x86)
+    const enable_sse3 = b.option(bool, "sse3", "Enable SSE3") orelse false;
+    const enable_avx = b.option(bool, "avx", "Enable AVX") orelse false;
+    const enable_avx2 = b.option(bool, "avx2", "Enable AVX2") orelse false;
+    const enable_avx512 = b.option(bool, "avx512", "Enable AVX-512") orelse false;
+    const enable_avx512_vnni = b.option(bool, "avx512_vnni", "Enable AVX-512 VNNI") orelse false;
+    const enable_avx_vnni = b.option(bool, "avx_vnni", "Enable AVX-VNNI") orelse false;
+    const enable_avx10 = b.option(bool, "avx10", "Enable AVX10") orelse false;
 
     const target_arch = target.result.cpu.arch;
     const target_os = target.result.os.tag;
@@ -56,14 +65,38 @@ pub fn build(b: *std.Build) void {
 
     // Architecture specific optimizations
     if (target_arch == .x86_64 or target_arch == .x86) {
-        c_flags_list.appendSlice(b.allocator, &[_][]const u8{
-            "-msse3", "-mssse3", "-mcx16",
-            "-mavx", "-mavx2", "-mfma", "-mf16c",
-        }) catch @panic("OOM");
-        cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{
-            "-msse3", "-mssse3", "-mcx16",
-            "-mavx", "-mavx2", "-mfma", "-mf16c",
-        }) catch @panic("OOM");
+        // Base x86 flag often required by llama.cpp
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mcx16" }) catch @panic("OOM");
+        cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mcx16" }) catch @panic("OOM");
+
+        if (enable_sse3) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-msse3", "-mssse3" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-msse3", "-mssse3" }) catch @panic("OOM");
+        }
+        if (enable_avx) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx" }) catch @panic("OOM");
+        }
+        if (enable_avx2) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx2", "-mfma", "-mf16c" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx2", "-mfma", "-mf16c" }) catch @panic("OOM");
+        }
+        if (enable_avx512) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx512f", "-mavx512bw", "-mavx512dq", "-mavx512vl" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx512f", "-mavx512bw", "-mavx512dq", "-mavx512vl" }) catch @panic("OOM");
+        }
+        if (enable_avx512_vnni) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx512vnni" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx512vnni" }) catch @panic("OOM");
+        }
+        if (enable_avx_vnni) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavxvnni" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavxvnni" }) catch @panic("OOM");
+        }
+        if (enable_avx10) {
+            c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx10.1-256" }) catch @panic("OOM");
+            cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx10.1-256" }) catch @panic("OOM");
+        }
     } else if (target_arch == .aarch64 or target_arch == .aarch64_be) {
         // ARM NEON is enabled by default on AArch64, but we ensure the preprocessor macros are ready.
         c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-D__ARM_NEON" }) catch @panic("OOM");
@@ -198,6 +231,15 @@ pub fn build(b: *std.Build) void {
         .flags = cpp_flags,
     });
 
+    // Compile C++ Bridge
+    exe.root_module.addCSourceFiles(.{
+        .root = b.path("src"),
+        .files = &.{
+            "dmt_bridge.cpp"
+        },
+        .flags = cpp_flags,
+    });
+
     // Include paths
     libllama.root_module.addIncludePath(b.path(std.fmt.comptimePrint("{s}/include", .{llama_dir})));
     libllama.root_module.addIncludePath(b.path(std.fmt.comptimePrint("{s}/ggml/include", .{llama_dir})));
@@ -207,8 +249,10 @@ pub fn build(b: *std.Build) void {
 
     // Link library to executable
     exe.root_module.linkLibrary(libllama);
+    exe.root_module.addIncludePath(b.path("src"));
     exe.root_module.addIncludePath(b.path(std.fmt.comptimePrint("{s}/include", .{llama_dir})));
     exe.root_module.addIncludePath(b.path(std.fmt.comptimePrint("{s}/ggml/include", .{llama_dir})));
+    exe.root_module.addIncludePath(b.path(std.fmt.comptimePrint("{s}/src", .{llama_dir})));
     
     b.installArtifact(exe);
 
