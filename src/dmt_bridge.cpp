@@ -63,49 +63,57 @@ void dmt_prune_model_tensors(struct llama_model * model, float prune_rate) {
     std::cout << "-> DMT C-Bridge: Pruned " << pruned_total << " / " << total_elements << " F32 elements.\n";
 }
 
-void dmt_staple_models(struct llama_model * student, struct llama_model * teacher) {
-    if (!student || !teacher) return;
+void dmt_staple_models(struct llama_model * small_model, struct llama_model * big_model) {
+    if (!small_model || !big_model) return;
     
-    std::cout << "-> DMT C-Bridge: Engaging Universal Sparse Autoencoder (SAE) Projection...\n";
+    std::cout << "-> DMT C-Bridge: Engaging Parameter-Level Expansion (PLE) Stapler...\n";
     size_t stapled_tensors = 0;
+    size_t pruned_elements = 0;
 
-    // We conceptually "staple" the teacher's knowledge into the student's sparse representation.
-    // In practice, we iterate matching layers, project the high-dimensional teacher weights
-    // into the low-dimensional student space using an accelerated pseudo-SAE (Sparse Autoencoder) transformation.
-    
-    for (auto & s_kv : student->tensors_by_name) {
-        struct ggml_tensor * s_t = s_kv.second;
+    // We mathematically map the sparse activation space of the small_model onto the dense space of the big_model.
+    for (auto & b_kv : big_model->tensors_by_name) {
+        struct ggml_tensor * b_t = b_kv.second;
         
-        // Find corresponding teacher tensor
-        auto t_kv = std::find_if(teacher->tensors_by_name.begin(), teacher->tensors_by_name.end(), 
-            [&](const std::pair<std::string, struct ggml_tensor *>& val) { return val.first == s_kv.first; });
-        if (t_kv != teacher->tensors_by_name.end()) {
-            struct ggml_tensor * t_t = t_kv->second;
+        // Find corresponding tensor in the small model mask
+        auto s_kv = std::find_if(small_model->tensors_by_name.begin(), small_model->tensors_by_name.end(), 
+            [&](const std::pair<std::string, struct ggml_tensor *>& val) { return val.first == b_kv.first; });
             
-            if (s_t->type == GGML_TYPE_F32 && t_t->type == GGML_TYPE_F32) {
+        if (s_kv != small_model->tensors_by_name.end()) {
+            struct ggml_tensor * s_t = s_kv->second;
+            
+            if (b_t->type == GGML_TYPE_F32 && s_t->type == GGML_TYPE_F32) {
+                float * b_data = (float *)b_t->data;
                 float * s_data = (float *)s_t->data;
-                float * t_data = (float *)t_t->data;
                 
-                size_t s_n = ggml_nelements(s_t);
-                size_t t_n = ggml_nelements(t_t);
-                
-                // Hyper-fast projection mapping
-                // For demonstration of the custom SAE stapler, we interleave the teacher's signal into the student's weights
-                // where the student's weights are activated (non-zero).
-                
-                size_t ratio = (t_n > s_n) ? (t_n / s_n) : 1;
-                
-                for (size_t i = 0; i < s_n; ++i) {
-                    if (std::abs(s_data[i]) > 1e-6f) { // Active parameter
-                        // Staple teacher's grouped magnitude into the student's activation pathway
-                        float t_signal = 0.0f;
-                        size_t t_base = i * ratio;
-                        for (size_t j = 0; j < ratio && (t_base + j) < t_n; ++j) {
-                            t_signal += t_data[t_base + j];
+                int64_t b_ne0 = std::max<int64_t>(1, b_t->ne[0]);
+                int64_t b_ne1 = std::max<int64_t>(1, b_t->ne[1]);
+                int64_t b_ne2 = std::max<int64_t>(1, b_t->ne[2]);
+                int64_t b_ne3 = std::max<int64_t>(1, b_t->ne[3]);
+
+                int64_t s_ne0 = std::max<int64_t>(1, s_t->ne[0]);
+                int64_t s_ne1 = std::max<int64_t>(1, s_t->ne[1]);
+                int64_t s_ne2 = std::max<int64_t>(1, s_t->ne[2]);
+                int64_t s_ne3 = std::max<int64_t>(1, s_t->ne[3]);
+
+                for (int64_t i3 = 0; i3 < b_ne3; ++i3) {
+                    int64_t s_i3 = (i3 * s_ne3) / b_ne3;
+                    for (int64_t i2 = 0; i2 < b_ne2; ++i2) {
+                        int64_t s_i2 = (i2 * s_ne2) / b_ne2;
+                        for (int64_t i1 = 0; i1 < b_ne1; ++i1) {
+                            int64_t s_i1 = (i1 * s_ne1) / b_ne1;
+                            for (int64_t i0 = 0; i0 < b_ne0; ++i0) {
+                                int64_t s_i0 = (i0 * s_ne0) / b_ne0;
+                                
+                                size_t b_idx = i3*(b_ne2*b_ne1*b_ne0) + i2*(b_ne1*b_ne0) + i1*b_ne0 + i0;
+                                size_t s_idx = s_i3*(s_ne2*s_ne1*s_ne0) + s_i2*(s_ne1*s_ne0) + s_i1*s_ne0 + s_i0;
+                                
+                                // If the small model parameter is inactive, deactivate the big model parameter.
+                                if (std::abs(s_data[s_idx]) < 1e-7f) {
+                                    b_data[b_idx] = 0.0f;
+                                    pruned_elements++;
+                                }
+                            }
                         }
-                        
-                        // Apply SAE scaling factor
-                        s_data[i] += (t_signal / static_cast<float>(ratio)) * 0.1f; 
                     }
                 }
                 stapled_tensors++;
@@ -113,7 +121,7 @@ void dmt_staple_models(struct llama_model * student, struct llama_model * teache
         }
     }
     
-    std::cout << "-> DMT C-Bridge: Successfully stapled " << stapled_tensors << " tensor groups via SAE scaling.\n";
+    std::cout << "-> DMT C-Bridge: Successfully stapled " << stapled_tensors << " tensor groups (Zeroed " << pruned_elements << " dead big-model parameters).\n";
 }
 
 void dmt_export_safetensors_impl(struct llama_model * model, const char * filename) {
