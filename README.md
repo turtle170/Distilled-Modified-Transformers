@@ -76,7 +76,10 @@ dmt staple-distill --student llama-3-8b.gguf \
 ```
 
 ### Important Execution Flags
-* `--read-linear`: Reverses the stapling memory-access loop. Forces the engine to scan the Teacher model linearly. Use this when your Teacher model is massive (e.g. 70B+ parameters) and being read directly from a hard drive to prevent heavy OS mmap page fault thrashing. Without this, the system defaults to fast Random Access mapping (best if you have lots of RAM).
+* `--read-random`: Reverses the stapling memory-access loop. Forces the engine to scan the Student model linearly and randomly map to the Teacher model. Use this when your Teacher model can easily fit into your RAM, as Random Access is fundamentally faster for smaller scale structural hops. (Default is `--read-linear` to prevent massive OS mmap page fault thrashing on NVMe Gen 4/5 drives during heavy topological mappings).
+* `--threads <N>` / `--threads-batch <N>`: Set specific CPU concurrency counts for standard generation vs heavy batch prompt processing. 
+* `-q <N>` / `--quality <N>`: Adjust the depth of iterative distillation cycles in pure distill mode. Defaults to 1. Set to 10 for hyper-refined mathematical gutting.
+* `--student-top-k`, `--student-top-p`, `--student-temp`, `--judge-temp`, `--judge-top-k`, `--judge-top-p`: Set hyper-precise model sampling boundaries during runtime logic evaluation.
 
 ## License
 MIT License - Copyright (c) 2026 turtle170.

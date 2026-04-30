@@ -38,13 +38,15 @@ const Config = struct {
     // Judge Inference Params
     judge_ctx_size: u32 = 8192,
     judge_temp: f32 = 0.0, // Judge should be deterministic
+    judge_top_k: i32 = 40,
+    judge_top_p: f32 = 0.95,
     
     // Training Loop
     epochs: u32 = 1,
     save_freq: u32 = 100, // Save every N cycles
     quality: u8 = 1,      // Distillation quality level 1-10
     // Execution options
-    read_linear: bool = false, // RA is default for stapling
+    read_linear: bool = true, // Linear is default for stapling
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -196,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("--- Refinement Cycle {d}/{d} ---\n", .{cycle + 1, cycles});
             
             // Evaluation
-            const response = try runInference(allocator, student_ctx, test_prompt, 256, config.student_temp);
+            const response = try runInference(allocator, student_ctx, test_prompt, 256, config.student_temp, config.student_top_k, config.student_top_p, config.seed);
             defer allocator.free(response);
 
             const judge_prompt = try std.fmt.allocPrint(allocator, 
@@ -205,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
                 "Context: {s}\nStudent: {s}\nScore:", .{test_prompt, response});
             defer allocator.free(judge_prompt);
             
-            const current_score_str = try runInference(allocator, judge_ctx, judge_prompt, 16, config.judge_temp);
+            const current_score_str = try runInference(allocator, judge_ctx, judge_prompt, 16, config.judge_temp, config.judge_top_k, config.judge_top_p, config.seed);
             defer allocator.free(current_score_str);
             const current_score = parseScore(current_score_str);
             std.debug.print("Current Judge Score: {d}\n", .{current_score});
@@ -258,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
             cycle += 1;
             
             // --- Step 1: Student Inference ---
-            const response = try runInference(allocator, student_ctx, line, 256, config.student_temp);
+            const response = try runInference(allocator, student_ctx, line, 256, config.student_temp, config.student_top_k, config.student_top_p, config.seed);
             defer allocator.free(response);
             
             // --- Step 2: Judge Evaluation ---
@@ -268,7 +270,7 @@ pub fn main(init: std.process.Init) !void {
                 "Context: {s}\nStudent: {s}\nScore:", .{line, response});
             defer allocator.free(judge_prompt);
 
-            const score_str = try runInference(allocator, judge_ctx, judge_prompt, 16, config.judge_temp);
+            const score_str = try runInference(allocator, judge_ctx, judge_prompt, 16, config.judge_temp, config.judge_top_k, config.judge_top_p, config.seed);
             defer allocator.free(score_str);
             const current_score = parseScore(score_str);
 
@@ -308,18 +310,32 @@ pub fn main(init: std.process.Init) !void {
 fn parseArgs(args: [][]const u8) !Config {
     var config = Config{};
     var i: usize = 0;
-    while (i < args.len) : (i += 2) {
-        if (i + 1 >= args.len) break;
+    while (i < args.len) {
         const flag = args[i];
+
+        // Handle parameterless boolean flags
+        if (std.mem.eql(u8, flag, "--read-linear")) {
+            config.read_linear = true;
+            i += 1;
+            continue;
+        } else if (std.mem.eql(u8, flag, "--read-random")) {
+            config.read_linear = false;
+            i += 1;
+            continue;
+        }
+
+        if (i + 1 >= args.len) break;
         const val = args[i + 1];
+        i += 2;
 
         if (std.mem.eql(u8, flag, "--student")) config.student_path = val
         else if (std.mem.eql(u8, flag, "--judge")) config.judge_path = val
+        else if (std.mem.eql(u8, flag, "--teacher")) config.teacher_path = val
         else if (std.mem.eql(u8, flag, "--dataset")) config.dataset_path = val
         else if (std.mem.eql(u8, flag, "--save-dir")) config.save_dir = val
         else if (std.mem.eql(u8, flag, "--out-format")) config.out_format = val
         else if (std.mem.eql(u8, flag, "--quant-type")) config.quant_type = val
-        else if (std.mem.eql(u8, flag, "--read-linear")) config.read_linear = true
+        else if (std.mem.eql(u8, flag, "--quality") or std.mem.eql(u8, flag, "-q")) config.quality = try std.fmt.parseInt(u8, val, 10)
         else if (std.mem.eql(u8, flag, "--threads")) config.threads = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--threads-batch")) config.threads_batch = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--ngl-student")) config.ngl_student = try std.fmt.parseInt(i32, val, 10)
@@ -328,10 +344,17 @@ fn parseArgs(args: [][]const u8) !Config {
         else if (std.mem.eql(u8, flag, "--prune-rate")) config.prune_rate = try std.fmt.parseFloat(f32, val)
         else if (std.mem.eql(u8, flag, "--prune-method")) config.prune_method = val
         else if (std.mem.eql(u8, flag, "--student-ctx")) config.student_ctx_size = try std.fmt.parseInt(u32, val, 10)
+        else if (std.mem.eql(u8, flag, "--student-batch-size")) config.student_batch_size = try std.fmt.parseInt(u32, val, 10)
         else if (std.mem.eql(u8, flag, "--student-temp")) config.student_temp = try std.fmt.parseFloat(f32, val)
+        else if (std.mem.eql(u8, flag, "--student-top-k")) config.student_top_k = try std.fmt.parseInt(i32, val, 10)
+        else if (std.mem.eql(u8, flag, "--student-top-p")) config.student_top_p = try std.fmt.parseFloat(f32, val)
         else if (std.mem.eql(u8, flag, "--judge-ctx")) config.judge_ctx_size = try std.fmt.parseInt(u32, val, 10)
+        else if (std.mem.eql(u8, flag, "--judge-temp")) config.judge_temp = try std.fmt.parseFloat(f32, val)
+        else if (std.mem.eql(u8, flag, "--judge-top-k")) config.judge_top_k = try std.fmt.parseInt(i32, val, 10)
+        else if (std.mem.eql(u8, flag, "--judge-top-p")) config.judge_top_p = try std.fmt.parseFloat(f32, val)
         else if (std.mem.eql(u8, flag, "--epochs")) config.epochs = try std.fmt.parseInt(u32, val, 10)
-        else if (std.mem.eql(u8, flag, "--save-freq")) config.save_freq = try std.fmt.parseInt(u32, val, 10);
+        else if (std.mem.eql(u8, flag, "--save-freq")) config.save_freq = try std.fmt.parseInt(u32, val, 10)
+        else if (std.mem.eql(u8, flag, "--seed")) config.seed = try std.fmt.parseInt(u32, val, 10);
     }
     return config;
 }
@@ -380,7 +403,7 @@ fn printUsage() void {
     , .{});
 }
 
-fn runInference(allocator: std.mem.Allocator, ctx: *llama.llama_context, prompt: []const u8, max_tokens: i32, temp: f32) ![]const u8 {
+fn runInference(allocator: std.mem.Allocator, ctx: *llama.llama_context, prompt: []const u8, max_tokens: i32, temp: f32, top_k: i32, top_p: f32, seed: u32) ![]const u8 {
     const model = llama.llama_get_model(ctx);
     const vocab = llama.llama_model_get_vocab(model);
 
@@ -400,8 +423,10 @@ fn runInference(allocator: std.mem.Allocator, ctx: *llama.llama_context, prompt:
     defer llama.llama_sampler_free(smpl);
 
     if (temp > 0) {
+        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_top_k(top_k));
+        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_top_p(top_p, 1));
         llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_temp(temp));
-        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_dist(42));
+        llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_dist(seed));
     } else {
         llama.llama_sampler_chain_add(smpl, llama.llama_sampler_init_greedy());
     }
