@@ -475,6 +475,8 @@ fn printUsage() void {
         \\Commands:
         \\  train                 Run evolutionary distillation with a Judge and dataset.
         \\  distill               Run pure distillation (pruning/quantization) directly on a Student model.
+        \\  staple                Merge/Staple a big Teacher model onto a small Student model topology.
+        \\  staple-distill        Staple models and then iteratively distill using the Judge.
         \\
         \\Required for Train:
         \\  --student <PATH>      Path to Student GGUF model
@@ -483,31 +485,44 @@ fn printUsage() void {
         \\
         \\Required for Distill:
         \\  --student <PATH>      Path to Student GGUF model
-        \\  --judge <PATH>        Path to Judge GGUF model
+        \\  --judge <PATH>        Path to Judge GGUF model (if quality > 1 or targeting parameters)
+        \\
+        \\Required for Staple / Staple-Distill:
+        \\  --student <PATH>      Path to Student GGUF model
+        \\  --teacher <PATH>      Path to massive Teacher GGUF model
         \\
         \\Execution Options:
         \\  --threads <N>         Number of threads for generation (default: 8)
         \\  --threads-batch <N>   Number of threads for batch/prompt processing (default: 8)
         \\  --ngl-student <N>     GPU layers for Student (default: 0)
-        \\  --ngl-judge <N>       GPU layers for Judge (default: 0)
+        \\  --ngl-judge <N>       GPU layers for Judge/Teacher (default: 0)
+        \\  --read-linear         (Staple Mode) Linearly scan Teacher directly from disk (default: true)
+        \\  --read-random         (Staple Mode) Randomly access Teacher memory, faster if huge RAM.
         \\
         \\Distillation Options:
         \\  -q, --quality <N>     Distillation quality level [1-10] (default: 1). Higher = more refinement cycles.
-        \\  --target-params <F>   Target parameter size in Billions (default: 5.5)
+        \\  --target-params <F>   Target parameter size in Billions (default: 5.5). Auto-halts when reached.
         \\  --prune-rate <F>      Percentage of weights to prune per drop (default: 0.01)
         \\  --prune-method <STR>  Pruning method [magnitude, random] (default: magnitude)
+        \\  --epochs <N>          Number of training epochs (default: 1)
         \\
         \\Output Options:
         \\  --save-dir <PATH>     Directory to save checkpoints (default: out)
-        \\  --out-format <FMT>    Output format [gguf, safetensors, onnx, exl2, awq, pytorch, tf, tflite] (default: gguf)
+        \\  --out-format <FMT>    Output format [gguf, safetensors] (default: gguf)
         \\  --quant-type <TYPE>   Quantization type (e.g., f16, q4_k_m, q8_0, iq2_xxs) (default: q4_k_m)
+        \\  --save-freq <N>       Save model every N cycles (default: 100)
         \\
         \\Inference Options:
+        \\  --seed <N>            Random seed (default: 42)
         \\  --student-ctx <N>     Context size for Student (default: 4096)
+        \\  --student-batch-size <N> Batch size for Student (default: 512)
         \\  --student-temp <F>    Temperature for Student generation (default: 0.7)
+        \\  --student-top-k <N>   Top-K for Student generation (default: 40)
+        \\  --student-top-p <F>   Top-P for Student generation (default: 0.95)
         \\  --judge-ctx <N>       Context size for Judge (default: 8192)
-        \\  --epochs <N>          Number of training epochs (default: 1)
-        \\  --save-freq <N>       Save model every N cycles (default: 100)
+        \\  --judge-temp <F>      Temperature for Judge generation (default: 0.0)
+        \\  --judge-top-k <N>     Top-K for Judge generation (default: 40)
+        \\  --judge-top-p <F>     Top-P for Judge generation (default: 0.95)
         \\
     , .{});
 }
