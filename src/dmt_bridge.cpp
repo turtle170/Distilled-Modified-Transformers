@@ -66,52 +66,90 @@ void dmt_prune_model_tensors(struct llama_model * model, float prune_rate) {
 void dmt_staple_models(struct llama_model * small_model, struct llama_model * big_model) {
     if (!small_model || !big_model) return;
     
-    std::cout << "-> DMT C-Bridge: Engaging Parameter-Level Expansion (PLE) Stapler...\n";
+    std::cout << "-> DMT C-Bridge: Engaging Parameter-Level Expansion (PLE) Universal Stapler...\n";
     size_t stapled_tensors = 0;
-    size_t pruned_elements = 0;
 
-    // We mathematically map the sparse activation space of the small_model onto the dense space of the big_model.
+    // First pass: Determine maximum block layer counts for structural proportion mapping
+    int max_s_layer = -1;
+    int max_b_layer = -1;
+    
+    for (auto & s_kv : small_model->tensors_by_name) {
+        size_t pos = s_kv.first.find("blk.");
+        if (pos != std::string::npos) {
+            size_t start = pos + 4;
+            size_t end = s_kv.first.find('.', start);
+            if (end != std::string::npos) {
+                int layer = std::stoi(s_kv.first.substr(start, end - start));
+                if (layer > max_s_layer) max_s_layer = layer;
+            }
+        }
+    }
+    
     for (auto & b_kv : big_model->tensors_by_name) {
-        struct ggml_tensor * b_t = b_kv.second;
+        size_t pos = b_kv.first.find("blk.");
+        if (pos != std::string::npos) {
+            size_t start = pos + 4;
+            size_t end = b_kv.first.find('.', start);
+            if (end != std::string::npos) {
+                int layer = std::stoi(b_kv.first.substr(start, end - start));
+                if (layer > max_b_layer) max_b_layer = layer;
+            }
+        }
+    }
+    
+    // We mathematically map the dense knowledge space of the big_model onto the small_model's exact shapes.
+    for (auto & s_kv : small_model->tensors_by_name) {
+        struct ggml_tensor * s_t = s_kv.second;
+        std::string target_b_name = s_kv.first;
         
-        // Find corresponding tensor in the small model mask
-        auto s_kv = std::find_if(small_model->tensors_by_name.begin(), small_model->tensors_by_name.end(), 
-            [&](const std::pair<std::string, struct ggml_tensor *>& val) { return val.first == b_kv.first; });
+        // Dynamically shift target tensor mapping based on architecture depth
+        size_t pos = s_kv.first.find("blk.");
+        if (pos != std::string::npos && max_s_layer > 0 && max_b_layer > 0) {
+            size_t start = pos + 4;
+            size_t end = s_kv.first.find('.', start);
+            if (end != std::string::npos) {
+                int s_layer = std::stoi(s_kv.first.substr(start, end - start));
+                int b_layer = std::round((float)s_layer * (float)max_b_layer / (float)max_s_layer);
+                target_b_name = s_kv.first.substr(0, start) + std::to_string(b_layer) + s_kv.first.substr(end);
+            }
+        }
+        
+        // Find corresponding tensor in the big model
+        auto b_kv = std::find_if(big_model->tensors_by_name.begin(), big_model->tensors_by_name.end(), 
+            [&](const std::pair<std::string, struct ggml_tensor *>& val) { return val.first == target_b_name; });
             
-        if (s_kv != small_model->tensors_by_name.end()) {
-            struct ggml_tensor * s_t = s_kv->second;
+        if (b_kv != big_model->tensors_by_name.end()) {
+            struct ggml_tensor * b_t = b_kv->second;
             
-            if (b_t->type == GGML_TYPE_F32 && s_t->type == GGML_TYPE_F32) {
-                float * b_data = (float *)b_t->data;
+            if (s_t->type == GGML_TYPE_F32 && b_t->type == GGML_TYPE_F32) {
                 float * s_data = (float *)s_t->data;
+                float * b_data = (float *)b_t->data;
                 
-                int64_t b_ne0 = std::max<int64_t>(1, b_t->ne[0]);
-                int64_t b_ne1 = std::max<int64_t>(1, b_t->ne[1]);
-                int64_t b_ne2 = std::max<int64_t>(1, b_t->ne[2]);
-                int64_t b_ne3 = std::max<int64_t>(1, b_t->ne[3]);
-
                 int64_t s_ne0 = std::max<int64_t>(1, s_t->ne[0]);
                 int64_t s_ne1 = std::max<int64_t>(1, s_t->ne[1]);
                 int64_t s_ne2 = std::max<int64_t>(1, s_t->ne[2]);
                 int64_t s_ne3 = std::max<int64_t>(1, s_t->ne[3]);
 
-                for (int64_t i3 = 0; i3 < b_ne3; ++i3) {
-                    int64_t s_i3 = (i3 * s_ne3) / b_ne3;
-                    for (int64_t i2 = 0; i2 < b_ne2; ++i2) {
-                        int64_t s_i2 = (i2 * s_ne2) / b_ne2;
-                        for (int64_t i1 = 0; i1 < b_ne1; ++i1) {
-                            int64_t s_i1 = (i1 * s_ne1) / b_ne1;
-                            for (int64_t i0 = 0; i0 < b_ne0; ++i0) {
-                                int64_t s_i0 = (i0 * s_ne0) / b_ne0;
+                int64_t b_ne0 = std::max<int64_t>(1, b_t->ne[0]);
+                int64_t b_ne1 = std::max<int64_t>(1, b_t->ne[1]);
+                int64_t b_ne2 = std::max<int64_t>(1, b_t->ne[2]);
+                int64_t b_ne3 = std::max<int64_t>(1, b_t->ne[3]);
+
+                // Project Big Model down to Small Model topology
+                for (int64_t i3 = 0; i3 < s_ne3; ++i3) {
+                    int64_t b_i3 = (i3 * b_ne3) / s_ne3;
+                    for (int64_t i2 = 0; i2 < s_ne2; ++i2) {
+                        int64_t b_i2 = (i2 * b_ne2) / s_ne2;
+                        for (int64_t i1 = 0; i1 < s_ne1; ++i1) {
+                            int64_t b_i1 = (i1 * b_ne1) / s_ne1;
+                            for (int64_t i0 = 0; i0 < s_ne0; ++i0) {
+                                int64_t b_i0 = (i0 * b_ne0) / s_ne0;
                                 
-                                size_t b_idx = i3*(b_ne2*b_ne1*b_ne0) + i2*(b_ne1*b_ne0) + i1*b_ne0 + i0;
-                                size_t s_idx = s_i3*(s_ne2*s_ne1*s_ne0) + s_i2*(s_ne1*s_ne0) + s_i1*s_ne0 + s_i0;
+                                size_t s_idx = i3*(s_ne2*s_ne1*s_ne0) + i2*(s_ne1*s_ne0) + i1*s_ne0 + i0;
+                                size_t b_idx = b_i3*(b_ne2*b_ne1*b_ne0) + b_i2*(b_ne1*b_ne0) + b_i1*b_ne0 + b_i0;
                                 
-                                // If the small model parameter is inactive, deactivate the big model parameter.
-                                if (std::abs(s_data[s_idx]) < 1e-7f) {
-                                    b_data[b_idx] = 0.0f;
-                                    pruned_elements++;
-                                }
+                                // True structural staple: small topology perfectly intercepts the intelligence topology of the big model
+                                s_data[s_idx] = (s_data[s_idx] + b_data[b_idx]) * 0.5f;
                             }
                         }
                     }
@@ -121,7 +159,7 @@ void dmt_staple_models(struct llama_model * small_model, struct llama_model * bi
         }
     }
     
-    std::cout << "-> DMT C-Bridge: Successfully stapled " << stapled_tensors << " tensor groups (Zeroed " << pruned_elements << " dead big-model parameters).\n";
+    std::cout << "-> DMT C-Bridge: Universal Staple Complete. Mapped " << stapled_tensors << " tensors to the small model's optimized architecture constraints.\n";
 }
 
 void dmt_export_safetensors_impl(struct llama_model * model, const char * filename) {
