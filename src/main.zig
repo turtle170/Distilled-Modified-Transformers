@@ -94,8 +94,8 @@ pub fn main(init: std.process.Init) !void {
 
     const config = try parseArgs(args[2..]);
     
-    if (is_train and (config.student_path.len == 0 or config.judge_path.len == 0 or config.dataset_path.len == 0)) {
-        std.debug.print("Error: --student, --judge, and --dataset paths are required for training.\n", .{});
+    if (is_train and (config.student_path.len == 0 or config.dataset_path.len == 0)) {
+        std.debug.print("Error: --student and --dataset paths are required for training.\n", .{});
         return;
     }
 
