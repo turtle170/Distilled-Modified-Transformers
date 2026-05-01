@@ -5,6 +5,7 @@ const exporter = @import("exporter.zig");
 const llama = @cImport({
     @cInclude("llama.h");
     @cInclude("ggml-backend.h");
+    @cInclude("ggml-cpu.h");
 });
 
 const Config = struct {
