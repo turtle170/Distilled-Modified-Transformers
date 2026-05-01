@@ -55,6 +55,14 @@ fn getActiveParams(model: *llama.llama_model) u64 {
     return c_bridge.dmt_get_active_parameters(@ptrCast(model));
 }
 
+fn muteLlamaLogs(level: llama.ggml_log_level, text: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = user_data;
+    // Only pass through error/warning logs (GGML_LOG_LEVEL_ERROR = 2, GGML_LOG_LEVEL_WARN = 3)
+    if (level == 2 or level == 3) {
+        std.debug.print("{s}", .{text});
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -105,14 +113,21 @@ pub fn main(init: std.process.Init) !void {
     const do_distill = is_distill or is_staple_distill or (is_staple and config.target_params_b > 0.0);
 
     // 1. Initialize llama.cpp backend
+    llama.llama_log_set(muteLlamaLogs, null);
     llama.llama_backend_init();
     defer llama.llama_backend_free();
     llama.ggml_backend_load_all();
 
+    // Core Error Handler
+    errdefer |err| {
+        std.debug.print("\n[CRITICAL ERROR] DMT Execution Halted: {s}\n", .{@errorName(err)});
+        std.debug.print("Please verify paths, memory limits, and Ensure GGUF formats are valid.\n", .{});
+    }
+
     std.debug.print("DMT Core: Backend Initialized. Threads: {d}\n", .{config.threads});
 
     // 2. Load Student Model (with Auto-Quantization based on param count)
-    const opt_student_path = try prepareModel(init.io, allocator, config.student_path, "student");
+    const opt_student_path = try prepareModel(init.io, allocator, config.student_path, "student", config.cpu_only);
     const opt_student_path_z = try allocator.dupeZ(u8, opt_student_path);
     defer allocator.free(opt_student_path_z);
 
@@ -210,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // JUDGE EVALUATION DISTILLATION (Iterative)
-        const opt_judge_path = try prepareModel(init.io, allocator, judge_model_path, "judge");
+        const opt_judge_path = try prepareModel(init.io, allocator, judge_model_path, "judge", config.cpu_only);
         const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
         defer allocator.free(opt_judge_path_z);
 
@@ -313,7 +328,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (is_train) {
         // --- Train Mode Specific Loading ---
-        const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge");
+        const opt_judge_path = try prepareModel(init.io, allocator, config.judge_path, "judge", config.cpu_only);
         const opt_judge_path_z = try allocator.dupeZ(u8, opt_judge_path);
         defer allocator.free(opt_judge_path_z);
 
@@ -633,7 +648,7 @@ fn pruneModelWeights(model: *llama.llama_model, p: *pruner.Pruner, rate: f32) !v
     c_bridge.dmt_prune_model_tensors(@ptrCast(model), rate);
 }
 
-fn prepareModel(io: std.Io, allocator: std.mem.Allocator, orig_path: []const u8, prefix: []const u8) ![]const u8 {
+fn prepareModel(io: std.Io, allocator: std.mem.Allocator, orig_path: []const u8, prefix: []const u8, cpu_only: bool) ![]const u8 {
     // 1. Load model with vocab_only to cheaply get metadata (fast, low memory)
     const orig_path_z = try allocator.dupeZ(u8, orig_path);
     defer allocator.free(orig_path_z);
@@ -648,24 +663,30 @@ fn prepareModel(io: std.Io, allocator: std.mem.Allocator, orig_path: []const u8,
     std.debug.print("-> Model '{s}' has {d} parameters.\n", .{prefix, n_params});
 
     var target_ftype: llama.llama_ftype = llama.LLAMA_FTYPE_MOSTLY_F16; // Default to no quant
-    var ftype_name: []const u8 = "F16";
+    var ftype_name: []const u8 = if (cpu_only) "CPU_INT8" else "F16";
     
     const ONE_B = 1_000_000_000;
     
-    // > 1B (e.g. 1.2B+)
-    if (n_params > (ONE_B + 200_000_000)) {
-        target_ftype = llama.LLAMA_FTYPE_MOSTLY_Q4_K_M;
-        ftype_name = "Q4_K_M";
-    } 
-    // ~ 1B (800M to 1.2B)
-    else if (n_params >= (ONE_B - 200_000_000) and n_params <= (ONE_B + 200_000_000)) {
+    if (cpu_only) {
+        // Aggressive INT8/INT4 target compilation logic specifically targeting CPU AVX operations
         target_ftype = llama.LLAMA_FTYPE_MOSTLY_Q8_0;
-        ftype_name = "Q8_0";
-    } 
-    // < 1B
-    else {
-        std.debug.print("   Model '{s}' < 1B params. Loading without forced quantization.\n", .{prefix});
-        return orig_path;
+        std.debug.print("   [CPU MODE] Compiling structural weights aggressively to INT8 bounds...\n", .{});
+    } else {
+        // > 1B (e.g. 1.2B+)
+        if (n_params > (ONE_B + 200_000_000)) {
+            target_ftype = llama.LLAMA_FTYPE_MOSTLY_Q4_K_M;
+            ftype_name = "Q4_K_M";
+        } 
+        // ~ 1B (800M to 1.2B)
+        else if (n_params >= (ONE_B - 200_000_000) and n_params <= (ONE_B + 200_000_000)) {
+            target_ftype = llama.LLAMA_FTYPE_MOSTLY_Q8_0;
+            ftype_name = "Q8_0";
+        } 
+        // < 1B
+        else {
+            std.debug.print("   Model '{s}' < 1B params. Loading without forced quantization.\n", .{prefix});
+            return orig_path;
+        }
     }
 
     // 2. Generate cached file path
@@ -690,6 +711,13 @@ fn prepareModel(io: std.Io, allocator: std.mem.Allocator, orig_path: []const u8,
 
         var qparams = llama.llama_model_quantize_default_params();
         qparams.ftype = target_ftype;
+        
+        if (cpu_only) {
+            // Force strict integer topologies into the compiler arrays simulating TPU XLA conversion bounds
+            qparams.output_tensor_type = llama.GGML_TYPE_Q8_0;
+            qparams.token_embedding_type = llama.GGML_TYPE_Q8_0;
+            qparams.pure = true; 
+        }
         
         if (llama.llama_model_quantize(orig_path_z.ptr, out_path_z.ptr, &qparams) != 0) {
             std.debug.print("   Warning: Auto-quantization failed (perhaps already quantized?). Proceeding with original.\n", .{});
