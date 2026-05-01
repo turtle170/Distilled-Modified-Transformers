@@ -142,9 +142,13 @@ pub fn main(init: std.process.Init) !void {
     if (do_staple) {
         std.debug.print("DMT: Commencing Parameter-Level Expansion (PLE) Stapling...\n", .{});
 
-        // For the teacher (big model), we strictly bypass auto-quantization and use mmap
-        // to stream weights directly from disk with minimal RAM footprint.
-        const opt_teacher_path_z = try allocator.dupeZ(u8, config.teacher_path);
+        // Apply CPU JIT Compilation to Teacher if requested, otherwise stream directly from disk
+        const opt_teacher_path = if (config.cpu_only) 
+            try prepareModel(init.io, allocator, config.teacher_path, "teacher", true)
+        else 
+            config.teacher_path;
+            
+        const opt_teacher_path_z = try allocator.dupeZ(u8, opt_teacher_path);
         defer allocator.free(opt_teacher_path_z);
 
         var teacher_params = llama.llama_model_default_params();
