@@ -75,11 +75,36 @@ dmt staple-distill --student llama-3-8b.gguf \
                    --q 5
 ```
 
-### Important Execution Flags
-* `--read-random`: Reverses the stapling memory-access loop. Forces the engine to scan the Student model linearly and randomly map to the Teacher model. Use this when your Teacher model can easily fit into your RAM, as Random Access is fundamentally faster for smaller scale structural hops. (Default is `--read-linear` to prevent massive OS mmap page fault thrashing on NVMe Gen 4/5 drives during heavy topological mappings).
-* `--threads <N>` / `--threads-batch <N>`: Set specific CPU concurrency counts for standard generation vs heavy batch prompt processing. 
-* `-q <N>` / `--quality <N>`: Adjust the depth of iterative distillation cycles in pure distill mode. Defaults to 1. Set to 10 for hyper-refined mathematical gutting.
-* `--student-top-k`, `--student-top-p`, `--student-temp`, `--judge-temp`, `--judge-top-k`, `--judge-top-p`: Set hyper-precise model sampling boundaries during runtime logic evaluation.
+### Exhaustive Parameter List
+* `--student <PATH>`: Path to Student GGUF model.
+* `--teacher <PATH>`: Path to massive Teacher GGUF model (for stapling).
+* `--judge <PATH>`: Path to Judge GGUF model (for training / distillation evaluation).
+* `--dataset <PATH>`: Path to .jsonl dataset (for training).
+* `--read-linear`: (Staple Mode) Linearly scan Teacher directly from disk (default: true).
+* `--read-random`: (Staple Mode) Randomly access Teacher memory, faster if huge RAM.
+* `--threads <N>`: Number of threads for standard generation (default: 8).
+* `--threads-batch <N>`: Number of threads for batch/prompt processing (default: 8).
+* `--ngl-student <N>`: GPU layers for Student (default: 0).
+* `--ngl-judge <N>`: GPU layers for Judge/Teacher (default: 0).
+* `-q <N>` / `--quality <N>`: Distillation quality level [1-10] (default: 1). Higher = more refinement cycles.
+* `--target-params <F>`: Target parameter size in Billions (default: 5.5). Auto-halts when reached.
+* `--prune-rate <F>`: Percentage of weights to prune per drop (default: 0.01).
+* `--prune-method <STR>`: Pruning method [magnitude, random] (default: magnitude).
+* `--epochs <N>`: Number of training epochs (default: 1).
+* `--save-dir <PATH>`: Directory to save checkpoints (default: out).
+* `--out-format <FMT>`: Output format [gguf, safetensors] (default: gguf).
+* `--quant-type <TYPE>`: Quantization type (e.g., f16, q4_k_m, q8_0, iq2_xxs) (default: q4_k_m).
+* `--save-freq <N>`: Save model every N cycles (default: 100).
+* `--seed <N>`: Random seed (default: 42).
+* `--student-ctx <N>`: Context size for Student (default: 4096).
+* `--student-batch-size <N>`: Batch size for Student (default: 512).
+* `--student-temp <F>`: Temperature for Student generation (default: 0.7).
+* `--student-top-k <N>`: Top-K for Student generation (default: 40).
+* `--student-top-p <F>`: Top-P for Student generation (default: 0.95).
+* `--judge-ctx <N>`: Context size for Judge (default: 8192).
+* `--judge-temp <F>`: Temperature for Judge generation (default: 0.0).
+* `--judge-top-k <N>`: Top-K for Judge generation (default: 40).
+* `--judge-top-p <F>`: Top-P for Judge generation (default: 0.95).
 
 ## License
 MIT License - Copyright (c) 2026 turtle170.
