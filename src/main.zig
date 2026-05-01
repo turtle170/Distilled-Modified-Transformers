@@ -106,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
     // 1. Initialize llama.cpp backend
     llama.llama_backend_init();
     defer llama.llama_backend_free();
+    llama.ggml_backend_load_all();
 
     std.debug.print("DMT Core: Backend Initialized. Threads: {d}\n", .{config.threads});
 
