@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
     const enable_avx512 = b.option(bool, "avx512", "Enable AVX-512") orelse false;
     const enable_avx512_vnni = b.option(bool, "avx512_vnni", "Enable AVX-512 VNNI") orelse false;
     const enable_avx_vnni = b.option(bool, "avx_vnni", "Enable AVX-VNNI") orelse false;
+    const enable_avx2_vnni = b.option(bool, "avx2_vnni", "Enable AVX2-VNNI (Alder Lake VEX-encoded VNNI)") orelse false;
     const enable_avx10 = b.option(bool, "avx10", "Enable AVX10") orelse false;
 
     const target_arch = target.result.cpu.arch;
@@ -89,7 +90,7 @@ pub fn build(b: *std.Build) void {
             c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx512vnni" }) catch @panic("OOM");
             cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavx512vnni" }) catch @panic("OOM");
         }
-        if (enable_avx_vnni) {
+        if (enable_avx_vnni or enable_avx2_vnni) {
             c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavxvnni" }) catch @panic("OOM");
             cpp_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-mavxvnni" }) catch @panic("OOM");
         }
