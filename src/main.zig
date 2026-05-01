@@ -48,6 +48,7 @@ const Config = struct {
     quality: u8 = 1,      // Distillation quality level 1-10
     // Execution options
     read_linear: bool = true, // Linear is default for stapling
+    cpu_only: bool = false,   // Extremely complex CPU optimization flag
 };
 
 fn getActiveParams(model: *llama.llama_model) u64 {
